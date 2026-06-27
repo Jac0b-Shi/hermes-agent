@@ -1740,6 +1740,8 @@ class AIAgent:
                     codex_reasoning_items=msg.get("codex_reasoning_items") if role == "assistant" else None,
                     codex_message_items=msg.get("codex_message_items") if role == "assistant" else None,
                     timestamp=msg.get("timestamp"),
+                    turn_id=msg.get("turn_id") or getattr(self, "_current_turn_id", None),
+                    compression_generation=msg.get("compression_generation") or getattr(self, "_context_acquisition_generation", 0),
                 )
                 flushed_ids.add(msg_id)
             self._last_flushed_db_idx = len(messages)
