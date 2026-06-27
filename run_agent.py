@@ -1903,6 +1903,8 @@ class AIAgent:
                     codex_reasoning_items=msg.get("codex_reasoning_items") if role == "assistant" else None,
                     codex_message_items=msg.get("codex_message_items") if role == "assistant" else None,
                     timestamp=_row_timestamp,
+                    turn_id=msg.get("turn_id") or getattr(self, "_current_turn_id", None),
+                    compression_generation=msg.get("compression_generation") or getattr(self, "_context_acquisition_generation", 0),
                 )
                 msg[_DB_PERSISTED_MARKER] = True
             # The intrinsic markers are now the sole source of truth. Reset the

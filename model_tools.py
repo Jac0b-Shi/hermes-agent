@@ -1227,6 +1227,35 @@ def handle_function_call(
             if function_name in {"write_file", "patch"}:
                 return json.dumps({"error": "Edit approval denied: approval guard failed"}, ensure_ascii=False)
 
+        try:
+            from agent.context_acquisition import enforce_action_safety
+
+            _safety_block = enforce_action_safety(
+                function_name,
+                function_args,
+                session_id=session_id or "",
+                turn_id=turn_id or "",
+            )
+        except Exception as _safety_err:
+            logger.debug("context action safety guard error: %s", _safety_err)
+            _safety_block = None
+        if _safety_block is not None:
+            _emit_post_tool_call_hook(
+                function_name=function_name,
+                function_args=function_args,
+                result=_safety_block,
+                task_id=task_id,
+                session_id=session_id,
+                tool_call_id=tool_call_id,
+                turn_id=turn_id,
+                api_request_id=api_request_id,
+                status="blocked",
+                error_type="requires_context_verification",
+                error_message="Action requires current-state evidence before execution",
+                middleware_trace=list(_tool_middleware_trace),
+            )
+            return _safety_block
+
         # Notify the read-loop tracker when a non-read/search tool runs,
         # so the *consecutive* counter resets (reads after other work are fine).
         if function_name not in _READ_SEARCH_TOOLS:
@@ -1289,6 +1318,18 @@ def handle_function_call(
                 turn_id=turn_id or "",
                 api_request_id=api_request_id or "",
             )
+            try:
+                from agent.context_acquisition import record_tool_evidence
+
+                record_tool_evidence(
+                    function_name,
+                    function_args,
+                    result,
+                    session_id=session_id or "",
+                    turn_id=turn_id or "",
+                )
+            except Exception as _evidence_err:
+                logger.debug("context evidence recording error: %s", _evidence_err)
         finally:
             if _approval_tokens is not None and reset_current_observability_context is not None:
                 try:

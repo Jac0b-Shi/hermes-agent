@@ -770,6 +770,30 @@ def run_conversation(
                 agent.session_id or "-",
             )
 
+        _effective_current_turn_user_idx = current_turn_user_idx
+        if (
+            _effective_current_turn_user_idx >= len(messages)
+            or messages[_effective_current_turn_user_idx].get("role") != "user"
+        ):
+            for _idx in range(len(messages) - 1, -1, -1):
+                if isinstance(messages[_idx], dict) and messages[_idx].get("role") == "user":
+                    _effective_current_turn_user_idx = _idx
+                    break
+
+        _context_acquisition_context = ""
+        try:
+            from agent.context_acquisition import run_context_acquisition_for_api
+
+            _ctx_acq = run_context_acquisition_for_api(
+                agent,
+                latest_user_message=original_user_message,
+                messages=messages,
+                current_turn_user_idx=_effective_current_turn_user_idx,
+            )
+            _context_acquisition_context = _ctx_acq.injection or ""
+        except Exception as _ctx_acq_err:
+            logger.debug("context acquisition skipped: %s", _ctx_acq_err)
+
         # Defensive: repair malformed role-alternation before API call.
         # Catches cases where the history got wedged into a
         # ``tool → user`` or ``user → user`` tail (e.g. after empty-
@@ -798,12 +822,14 @@ def run_conversation(
             # with target="user_message" (the default).  Both are
             # API-call-time only — the original message in `messages` is
             # never mutated, so nothing leaks into session persistence.
-            if idx == current_turn_user_idx and msg.get("role") == "user":
+            if idx == _effective_current_turn_user_idx and msg.get("role") == "user":
                 _injections = []
                 if _ext_prefetch_cache:
                     _fenced = build_memory_context_block(_ext_prefetch_cache)
                     if _fenced:
                         _injections.append(_fenced)
+                if _context_acquisition_context:
+                    _injections.append(_context_acquisition_context)
                 if _plugin_user_context:
                     _injections.append(_plugin_user_context)
                 if _injections:
@@ -824,6 +850,10 @@ def run_conversation(
                 api_msg.pop("finish_reason")
             # Strip internal thinking-prefill marker
             api_msg.pop("_thinking_prefill", None)
+            # Persistence/recovery metadata is for SessionDB and archive
+            # reconstruction only. Never send it as provider message fields.
+            api_msg.pop("turn_id", None)
+            api_msg.pop("compression_generation", None)
             # Strip Codex Responses API fields (call_id, response_item_id) for
             # strict providers like Mistral, Fireworks, etc. that reject unknown fields.
             # Uses new dicts so the internal messages list retains the fields

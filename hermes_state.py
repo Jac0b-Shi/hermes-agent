@@ -784,7 +784,9 @@ CREATE TABLE IF NOT EXISTS messages (
     platform_message_id TEXT,
     observed INTEGER DEFAULT 0,
     active INTEGER NOT NULL DEFAULT 1,
-    compacted INTEGER NOT NULL DEFAULT 0
+    compacted INTEGER NOT NULL DEFAULT 0,
+    turn_id TEXT,
+    compression_generation INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS session_model_usage (
@@ -876,6 +878,10 @@ CREATE INDEX IF NOT EXISTS idx_sessions_gateway_peer
     ON sessions(source, user_id, chat_id, chat_type, thread_id, started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_sessions_handoff_state
     ON sessions(handoff_state, started_at);
+CREATE INDEX IF NOT EXISTS idx_messages_session_compacted
+    ON messages(session_id, active, compacted, timestamp);
+CREATE INDEX IF NOT EXISTS idx_messages_turn_id
+    ON messages(session_id, turn_id);
 """
 
 FTS_SQL = """
@@ -3770,6 +3776,8 @@ class SessionDB:
         observed: bool = False,
         effect_disposition: Optional[str] = None,
         timestamp: Any = None,
+        turn_id: str = None,
+        compression_generation: int = 0,
     ) -> int:
         """
         Append a message to a session. Returns the message row ID.
@@ -3810,6 +3818,10 @@ class SessionDB:
                     message_timestamp = float(timestamp)
             except (TypeError, ValueError):
                 logger.debug("Ignoring invalid explicit message timestamp: %r", timestamp)
+        try:
+            comp_generation = int(compression_generation or 0)
+        except (TypeError, ValueError):
+            comp_generation = 0
 
         # Pre-compute tool call count
         num_tool_calls = 0
@@ -3821,8 +3833,9 @@ class SessionDB:
                 """INSERT INTO messages (session_id, role, content, tool_call_id,
                    tool_calls, tool_name, effect_disposition, timestamp, token_count, finish_reason,
                    reasoning, reasoning_content, reasoning_details, codex_reasoning_items,
-                   codex_message_items, platform_message_id, observed, active)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   codex_message_items, platform_message_id, observed, active, turn_id,
+                   compression_generation)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     session_id,
                     role,
@@ -3842,6 +3855,8 @@ class SessionDB:
                     platform_message_id,
                     1 if observed else 0,
                     1,
+                    turn_id,
+                    comp_generation,
                 ),
             )
             msg_id = cursor.lastrowid
@@ -3909,13 +3924,18 @@ class SessionDB:
             platform_msg_id = (
                 msg.get("platform_message_id") or msg.get("message_id")
             )
+            try:
+                comp_generation = int(msg.get("compression_generation") or 0)
+            except (TypeError, ValueError):
+                comp_generation = 0
 
             conn.execute(
                 """INSERT INTO messages (session_id, role, content, tool_call_id,
                    tool_calls, tool_name, effect_disposition, timestamp, token_count, finish_reason,
                    reasoning, reasoning_content, reasoning_details, codex_reasoning_items,
-                   codex_message_items, platform_message_id, observed, active)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   codex_message_items, platform_message_id, observed, active, turn_id,
+                   compression_generation)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     session_id,
                     role,
@@ -3935,6 +3955,8 @@ class SessionDB:
                     platform_msg_id,
                     1 if msg.get("observed") else 0,
                     1,
+                    msg.get("turn_id"),
+                    comp_generation,
                 ),
             )
             inserted += 1
@@ -5147,6 +5169,124 @@ class SessionDB:
             match.pop("content", None)
 
         return matches
+
+    def search_compacted_archive_messages(
+        self,
+        session_id: str,
+        query: str,
+        limit: int = 8,
+        boundary_turn_id: str = None,
+    ) -> List[Dict[str, Any]]:
+        """Search archived compacted rows for the current session.
+
+        This is intentionally narrower than ``search_messages``: it only reads
+        ``active=0, compacted=1`` rows from one durable session.  It is used by
+        post-compaction recovery to rebuild task state without treating older
+        current-session turns as live instructions.
+        """
+        if not session_id or limit <= 0:
+            return []
+
+        sanitized_query = self._sanitize_fts5_query(query or "")
+        rows: List[Dict[str, Any]] = []
+
+        if self._fts_enabled and sanitized_query:
+            sql = """
+                SELECT
+                    m.id,
+                    m.session_id,
+                    m.role,
+                    m.content,
+                    m.timestamp,
+                    m.tool_name,
+                    m.tool_call_id,
+                    m.turn_id,
+                    m.compression_generation,
+                    m.active,
+                    m.compacted,
+                    bm25(messages_fts) AS bm25_rank,
+                    CASE WHEN ? != '' AND m.turn_id = ? THEN 0 ELSE 1 END AS boundary_rank
+                FROM messages_fts
+                JOIN messages m ON m.id = messages_fts.rowid
+                WHERE messages_fts MATCH ?
+                  AND m.session_id = ?
+                  AND m.active = 0
+                  AND m.compacted = 1
+                ORDER BY boundary_rank ASC, bm25_rank ASC, m.timestamp DESC, m.id DESC
+                LIMIT ?
+            """
+            with self._lock:
+                try:
+                    rows = [
+                        dict(row)
+                        for row in self._conn.execute(
+                            sql,
+                            (
+                                boundary_turn_id or "",
+                                boundary_turn_id or "",
+                                sanitized_query,
+                                session_id,
+                                limit,
+                            ),
+                        ).fetchall()
+                    ]
+                except sqlite3.OperationalError:
+                    rows = []
+
+        if boundary_turn_id:
+            seen_ids = {row.get("id") for row in rows}
+            with self._lock:
+                boundary_rows = [
+                    dict(row)
+                    for row in self._conn.execute(
+                        """
+                        SELECT id, session_id, role, content, timestamp, tool_name,
+                               tool_call_id, turn_id, compression_generation,
+                               active, compacted
+                        FROM messages
+                        WHERE session_id = ?
+                          AND turn_id = ?
+                          AND active = 0
+                          AND compacted = 1
+                        ORDER BY timestamp DESC, id DESC
+                        LIMIT 1
+                        """,
+                        (session_id, boundary_turn_id),
+                    ).fetchall()
+                ]
+            for boundary_row in boundary_rows:
+                if boundary_row.get("id") not in seen_ids:
+                    rows.insert(0, boundary_row)
+                    seen_ids.add(boundary_row.get("id"))
+
+        if not rows:
+            with self._lock:
+                rows = [
+                    dict(row)
+                    for row in self._conn.execute(
+                        """
+                        SELECT id, session_id, role, content, timestamp, tool_name,
+                               tool_call_id, turn_id, compression_generation,
+                               active, compacted
+                        FROM messages
+                        WHERE session_id = ?
+                          AND active = 0
+                          AND compacted = 1
+                        ORDER BY timestamp DESC, id DESC
+                        LIMIT ?
+                        """,
+                        (session_id, limit),
+                    ).fetchall()
+                ]
+
+        for row in rows:
+            if "content" in row:
+                row["content"] = self._decode_content(row["content"])
+            if not row.get("turn_id"):
+                row["turn_id"] = f"legacy:{row.get('id')}"
+            if row.get("compression_generation") is None:
+                row["compression_generation"] = 0
+        return rows
 
     def search_sessions_by_id(
         self,

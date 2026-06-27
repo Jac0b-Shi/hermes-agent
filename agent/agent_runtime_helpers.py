@@ -2469,6 +2469,10 @@ def sanitize_api_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]
     # --- Role allowlist: drop messages with roles the API won't accept ---
     filtered = []
     for msg in messages:
+        # Session/archive metadata is persisted locally but is not part of any
+        # provider message schema.
+        msg.pop("turn_id", None)
+        msg.pop("compression_generation", None)
         role = msg.get("role")
         if role not in _ra().AIAgent._VALID_API_ROLES:
             _ra().logger.debug(

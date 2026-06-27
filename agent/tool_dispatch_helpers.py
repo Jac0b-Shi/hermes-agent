@@ -365,6 +365,8 @@ def make_tool_result_message(
     tool_call_id: str,
     *,
     effect_disposition: str | None = None,
+    turn_id: str | None = None,
+    compression_generation: int = 0,
 ) -> dict:
     """Build a tool-result message dict with both the OpenAI-format ``name``
     field (required by the wire format and provider adapters) and the internal
@@ -393,6 +395,12 @@ def make_tool_result_message(
         "content": wrapped,
         "tool_call_id": tool_call_id,
     }
+    if turn_id:
+        message["turn_id"] = turn_id
+    try:
+        message["compression_generation"] = int(compression_generation or 0)
+    except (TypeError, ValueError):
+        message["compression_generation"] = 0
     try:
         risk_metadata = _tool_output_risk_metadata(name, content)
     except Exception as exc:

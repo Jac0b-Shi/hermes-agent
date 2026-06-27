@@ -322,6 +322,36 @@ def _run_agent_tool_execution_middleware(
     return result, observed_args
 
 
+def _context_action_safety_block(
+    agent,
+    *,
+    function_name: str,
+    function_args: dict,
+) -> Optional[str]:
+    try:
+        from agent.context_acquisition import enforce_action_safety
+
+        return enforce_action_safety(
+            function_name,
+            function_args,
+            session_id=getattr(agent, "session_id", "") or "",
+            turn_id=getattr(agent, "_current_turn_id", "") or "",
+        )
+    except Exception as exc:
+        logger.debug("context action safety guard error: %s", exc)
+        return None
+
+
+def _make_turn_tool_result_message(agent, name: str, content: Any, tool_call_id: str) -> dict:
+    return make_tool_result_message(
+        name,
+        content,
+        tool_call_id,
+        turn_id=getattr(agent, "_current_turn_id", "") or None,
+        compression_generation=int(getattr(agent, "_context_acquisition_generation", 0) or 0),
+    )
+
+
 def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effective_task_id: str, api_call_count: int = 0) -> None:
     """Execute multiple tool calls concurrently using a thread pool.
 
@@ -339,7 +369,8 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
     if agent._interrupt_requested:
         print(f"{agent.log_prefix}⚡ Interrupt: skipping {num_tools} tool call(s)")
         for tc in tool_calls:
-            messages.append(make_tool_result_message(
+            messages.append(_make_turn_tool_result_message(
+                agent,
                 tc.function.name,
                 f"[Tool execution cancelled — {tc.function.name} was skipped due to user interrupt]",
                 tc.id,
@@ -490,6 +521,26 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
                         error_message=getattr(guardrail_decision, "message", None) or "Tool blocked by guardrail policy",
                         middleware_trace=list(middleware_trace),
                     )
+                else:
+                    safety_block = _context_action_safety_block(
+                        agent,
+                        function_name=function_name,
+                        function_args=function_args,
+                    )
+                    if safety_block is not None:
+                        block_result = safety_block
+                        _emit_terminal_post_tool_call(
+                            agent,
+                            function_name=function_name,
+                            function_args=function_args,
+                            result=block_result,
+                            effective_task_id=effective_task_id,
+                            tool_call_id=getattr(tool_call, "id", "") or "",
+                            status="blocked",
+                            error_type="requires_context_verification",
+                            error_message="Action requires current-state evidence before execution",
+                            middleware_trace=list(middleware_trace),
+                        )
 
         # ── Checkpoint preflight (only for tools that will execute) ──
         if block_result is None:
@@ -974,6 +1025,8 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
             _tool_content,
             tc.id,
             effect_disposition=effect_disposition,
+            turn_id=getattr(agent, "_current_turn_id", "") or None,
+            compression_generation=int(getattr(agent, "_context_acquisition_generation", 0) or 0),
         )
         messages.append(tool_message)
         risk_metadata = tool_message.get("_tool_output_risk")
@@ -1033,7 +1086,8 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                 agent._vprint(f"{agent.log_prefix}⚡ Interrupt: skipping {len(remaining_calls)} tool call(s)", force=True)
             for skipped_tc in remaining_calls:
                 skipped_name = skipped_tc.function.name
-                messages.append(make_tool_result_message(
+                messages.append(_make_turn_tool_result_message(
+                    agent,
                     skipped_name,
                     f"[Tool execution cancelled — {skipped_name} was skipped due to user interrupt]",
                     skipped_tc.id,
@@ -1118,12 +1172,23 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                 pass
 
         _guardrail_block_decision: ToolGuardrailDecision | None = None
+        _safety_block_result: Optional[str] = None
         if _block_msg is None:
             guardrail_decision = agent._tool_guardrails.before_call(function_name, function_args)
             if not guardrail_decision.allows_execution:
                 _guardrail_block_decision = guardrail_decision
+            else:
+                _safety_block_result = _context_action_safety_block(
+                    agent,
+                    function_name=function_name,
+                    function_args=function_args,
+                )
 
-        _execution_blocked = _block_msg is not None or _guardrail_block_decision is not None
+        _execution_blocked = (
+            _block_msg is not None
+            or _guardrail_block_decision is not None
+            or _safety_block_result is not None
+        )
 
         if _execution_blocked:
             # Tool blocked by plugin or guardrail policy — skip counters,
@@ -1214,6 +1279,21 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                 status="blocked",
                 error_type=_block_error_type,
                 error_message=_block_msg,
+                middleware_trace=list(middleware_trace),
+            )
+        elif _safety_block_result is not None:
+            function_result = _safety_block_result
+            tool_duration = 0.0
+            _emit_terminal_post_tool_call(
+                agent,
+                function_name=function_name,
+                function_args=function_args,
+                result=function_result,
+                effective_task_id=effective_task_id,
+                tool_call_id=getattr(tool_call, "id", "") or "",
+                status="blocked",
+                error_type="requires_context_verification",
+                error_message="Action requires current-state evidence before execution",
                 middleware_trace=list(middleware_trace),
             )
         elif _guardrail_block_decision is not None:
@@ -1653,7 +1733,13 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
         # Unwrap _multimodal dicts to an OpenAI-style content list
         # (see parallel path for rationale). String results pass through.
         _tool_content = agent._tool_result_content_for_active_model(function_name, function_result)
-        tool_message = make_tool_result_message(function_name, _tool_content, tool_call.id)
+        tool_message = make_tool_result_message(
+            function_name,
+            _tool_content,
+            tool_call.id,
+            turn_id=getattr(agent, "_current_turn_id", "") or None,
+            compression_generation=int(getattr(agent, "_context_acquisition_generation", 0) or 0),
+        )
         messages.append(tool_message)
         risk_metadata = tool_message.get("_tool_output_risk")
         if (
@@ -1698,7 +1784,8 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
             agent._vprint(f"{agent.log_prefix}⚡ Interrupt: skipping {remaining} remaining tool call(s)", force=True)
             for skipped_tc in assistant_message.tool_calls[i:]:
                 skipped_name = skipped_tc.function.name
-                messages.append(make_tool_result_message(
+                messages.append(_make_turn_tool_result_message(
+                    agent,
                     skipped_name,
                     f"[Tool execution skipped — {skipped_name} was not started. User sent a new message]",
                     skipped_tc.id,

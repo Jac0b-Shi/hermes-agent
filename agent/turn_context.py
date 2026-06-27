@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 import uuid
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
@@ -215,9 +216,16 @@ def build_turn_context(
     # Generate unique task_id if not provided to isolate VMs between tasks.
     effective_task_id = task_id or str(uuid.uuid4())
     agent._current_task_id = effective_task_id
-    turn_id = f"{agent.session_id or 'session'}:{effective_task_id}:{uuid.uuid4().hex[:8]}"
+    turn_id = f"{agent.session_id or 'session'}:{int(time.time() * 1000)}:{uuid.uuid4().hex[:8]}"
     agent._current_turn_id = turn_id
     agent._current_api_request_id = ""
+    agent._context_safety_evidence = []
+    try:
+        from agent.context_acquisition import register_turn_safety_context
+
+        register_turn_safety_context(agent, turn_id)
+    except Exception:
+        logger.debug("context safety registration skipped", exc_info=True)
 
     # Reset retry counters and iteration budget at the start of each turn.
     agent._invalid_tool_retries = 0
@@ -314,7 +322,12 @@ def build_turn_context(
             agent._turns_since_memory = 0
 
     # Add user message.
-    user_msg = {"role": "user", "content": user_message}
+    user_msg = {
+        "role": "user",
+        "content": user_message,
+        "turn_id": turn_id,
+        "compression_generation": int(getattr(agent, "_context_acquisition_generation", 0) or 0),
+    }
     messages.append(user_msg)
     current_turn_user_idx = len(messages) - 1
     agent._persist_user_message_idx = current_turn_user_idx

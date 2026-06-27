@@ -1610,6 +1610,10 @@ def init_agent(
             codex_app_server_auto_compaction,
         )
         codex_app_server_auto_compaction = "native"
+    try:
+        _context_acquisition_cfg = cfg_get(_agent_cfg, "context_acquisition", default={})
+    except Exception:
+        _context_acquisition_cfg = {}
 
     # Read optional explicit context_length override for the auxiliary
     # compression model. Custom endpoints often cannot report this via
@@ -1865,6 +1869,14 @@ def init_agent(
     agent.compression_enabled = compression_enabled
     agent.compression_in_place = compression_in_place
     agent.codex_app_server_auto_compaction = codex_app_server_auto_compaction
+    try:
+        from agent.context_acquisition import configure_agent as _configure_context_acquisition
+
+        _configure_context_acquisition(agent, _context_acquisition_cfg)
+    except Exception as _ctx_acq_err:
+        logger.debug("context acquisition config initialization failed: %s", _ctx_acq_err)
+        agent.context_acquisition_enabled = False
+        agent._context_acquisition_config = {}
 
     # Reject models whose context window is below the minimum required
     # for reliable tool-calling workflows (64K tokens).

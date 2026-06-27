@@ -534,4 +534,11 @@ def finalize_turn(
     except Exception as exc:
         logger.warning("on_session_end hook failed: %s", exc)
 
+    try:
+        from agent.context_acquisition import unregister_turn_safety_context
+
+        unregister_turn_safety_context(turn_id)
+    except Exception:
+        logger.debug("context safety unregister failed", exc_info=True)
+
     return result

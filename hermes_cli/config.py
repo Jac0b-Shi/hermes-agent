@@ -1478,6 +1478,25 @@ DEFAULT_CONFIG = {
                                       # after live validation.
     },
 
+    "context_acquisition": {
+        "enabled": True,
+        "mode": "hybrid",             # rules | llm | hybrid. Rules handle high-confidence
+                                      # cases; hybrid may call auxiliary.context_acquisition
+                                      # for ambiguous post-compaction turns.
+        "post_compaction_turns": 2,   # first N turns after compaction run continuity
+                                      # checks; set to 3/4 locally for longer
+                                      # continuation chains.
+        "max_injected_chars": 12000,
+        "archive_window": 20,
+        "archive_top_k": 8,
+        "expand_neighbors": 2,
+        "recent_verbatim_turns": 6,
+        "inject_recovery_instruction": True,
+        "verify_before_side_effects": True,
+        "project_context_cache": True,
+        "debug": False,
+    },
+
     # Kanban subsystem (orchestrator workers + dispatcher-driven child tasks).
     # See tools/kanban_tools.py and hermes_cli/kanban_db.py for the actual
     # implementations. Per-platform notification opt-out is handled by the
@@ -1597,6 +1616,14 @@ DEFAULT_CONFIG = {
             "base_url": "",
             "api_key": "",
             "timeout": 120,        # seconds — compression summarises large contexts; increase for local models
+            "extra_body": {},
+        },
+        "context_acquisition": {
+            "provider": "auto",
+            "model": "",
+            "base_url": "",
+            "api_key": "",
+            "timeout": 8,
             "extra_body": {},
         },
         # Note: session_search no longer uses an auxiliary LLM (PR #27590 —
