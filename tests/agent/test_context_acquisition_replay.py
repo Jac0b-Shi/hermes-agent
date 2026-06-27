@@ -21,6 +21,42 @@ def _make_db(tmp_path):
     return db
 
 
+def test_message_metadata_backfill_and_lineage_archive_search(tmp_path):
+    db_path = tmp_path / "state.db"
+    db = SessionDB(db_path=db_path)
+    db.create_session("root", source="cli")
+    db.create_session("child", source="cli", parent_session_id="root")
+    db.append_message(
+        "root",
+        role="user",
+        content="压缩前任务：继续 context acquisition lineage 检索",
+    )
+    db.archive_and_compact("root", [_summary_message({"active_task": "lineage 检索"})])
+    with db._lock:
+        db._conn.execute(
+            "UPDATE messages SET turn_id = NULL, created_at = NULL, lineage_id = NULL"
+        )
+        db._conn.commit()
+    db.close()
+
+    reopened = SessionDB(db_path=db_path)
+    rows = reopened.search_compacted_archive_messages(
+        "child",
+        "context acquisition lineage",
+        limit=4,
+    )
+
+    assert rows
+    assert any("lineage 检索" in str(row.get("content")) for row in rows)
+    for row in reopened._conn.execute(
+        "SELECT id, turn_id, created_at, lineage_id, compression_generation FROM messages"
+    ).fetchall():
+        assert row["turn_id"] == f"legacy:{row['id']}"
+        assert row["created_at"] is not None
+        assert row["lineage_id"] == "root"
+        assert row["compression_generation"] in {0, 1}
+
+
 def _agent(db, *, remaining=2, generation=1):
     cfg = dict(DEFAULT_CONTEXT_ACQUISITION_CONFIG)
     cfg.update({"enabled": True, "mode": "rules", "post_compaction_turns": 2})
