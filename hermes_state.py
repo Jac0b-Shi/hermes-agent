@@ -786,6 +786,8 @@ CREATE TABLE IF NOT EXISTS messages (
     active INTEGER NOT NULL DEFAULT 1,
     compacted INTEGER NOT NULL DEFAULT 0,
     turn_id TEXT,
+    created_at REAL,
+    lineage_id TEXT,
     compression_generation INTEGER NOT NULL DEFAULT 0
 );
 
@@ -882,6 +884,8 @@ CREATE INDEX IF NOT EXISTS idx_messages_session_compacted
     ON messages(session_id, active, compacted, timestamp);
 CREATE INDEX IF NOT EXISTS idx_messages_turn_id
     ON messages(session_id, turn_id);
+CREATE INDEX IF NOT EXISTS idx_messages_lineage_compacted
+    ON messages(lineage_id, active, compacted, timestamp);
 """
 
 FTS_SQL = """
@@ -1423,6 +1427,71 @@ class SessionDB:
                             "reconcile %s.%s: %s", table_name, col_name, exc,
                         )
 
+    @staticmethod
+    def _lineage_id_for_session_conn(conn: sqlite3.Connection, session_id: str) -> str:
+        """Return the root session id for *session_id*'s parent chain."""
+        if not session_id:
+            return ""
+        current = session_id
+        seen = set()
+        for _ in range(100):
+            if not current or current in seen:
+                break
+            seen.add(current)
+            row = conn.execute(
+                "SELECT parent_session_id FROM sessions WHERE id = ?",
+                (current,),
+            ).fetchone()
+            if row is None:
+                return current
+            parent = row["parent_session_id"] if hasattr(row, "keys") else row[0]
+            if not parent:
+                return current
+            current = parent
+        return current or session_id
+
+    def _backfill_message_metadata(self, cursor: sqlite3.Cursor) -> None:
+        """Populate post-compaction recovery metadata for legacy rows."""
+        try:
+            cursor.execute(
+                "UPDATE messages SET created_at = timestamp "
+                "WHERE created_at IS NULL"
+            )
+        except sqlite3.OperationalError:
+            pass
+        try:
+            cursor.execute(
+                "UPDATE messages SET compression_generation = 0 "
+                "WHERE compression_generation IS NULL"
+            )
+        except sqlite3.OperationalError:
+            pass
+        try:
+            cursor.execute(
+                "UPDATE messages SET turn_id = 'legacy:' || id "
+                "WHERE turn_id IS NULL OR turn_id = ''"
+            )
+        except sqlite3.OperationalError:
+            pass
+        try:
+            session_rows = cursor.execute(
+                "SELECT DISTINCT session_id FROM messages "
+                "WHERE lineage_id IS NULL OR lineage_id = ''"
+            ).fetchall()
+            for row in session_rows:
+                session_id = row["session_id"] if hasattr(row, "keys") else row[0]
+                lineage_id = self._lineage_id_for_session_conn(
+                    cursor.connection, session_id
+                )
+                cursor.execute(
+                    "UPDATE messages SET lineage_id = ? "
+                    "WHERE session_id = ? "
+                    "AND (lineage_id IS NULL OR lineage_id = '')",
+                    (lineage_id, session_id),
+                )
+        except sqlite3.OperationalError:
+            pass
+
     def _init_schema(self):
         """Create tables and FTS if they don't exist, reconcile columns.
 
@@ -1446,6 +1515,7 @@ class SessionDB:
         # migration was skipped (e.g. due to version renumbering), the
         # column gets created here.
         self._reconcile_columns(cursor)
+        self._backfill_message_metadata(cursor)
 
         # Indexes that reference reconciler-added columns must be created
         # AFTER _reconcile_columns runs — declaring them in SCHEMA_SQL
@@ -3829,13 +3899,15 @@ class SessionDB:
             num_tool_calls = len(tool_calls) if isinstance(tool_calls, list) else 1
 
         def _do(conn):
+            lineage_id = self._lineage_id_for_session_conn(conn, session_id)
             cursor = conn.execute(
                 """INSERT INTO messages (session_id, role, content, tool_call_id,
                    tool_calls, tool_name, effect_disposition, timestamp, token_count, finish_reason,
                    reasoning, reasoning_content, reasoning_details, codex_reasoning_items,
                    codex_message_items, platform_message_id, observed, active, turn_id,
+                   created_at, lineage_id,
                    compression_generation)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     session_id,
                     role,
@@ -3856,10 +3928,17 @@ class SessionDB:
                     1 if observed else 0,
                     1,
                     turn_id,
+                    message_timestamp,
+                    lineage_id,
                     comp_generation,
                 ),
             )
             msg_id = cursor.lastrowid
+            if not turn_id:
+                conn.execute(
+                    "UPDATE messages SET turn_id = ? WHERE id = ?",
+                    (f"legacy:{msg_id}", msg_id),
+                )
 
             # Update counters
             if num_tool_calls > 0:
@@ -3889,6 +3968,7 @@ class SessionDB:
         now_ts = time.time()
         inserted = 0
         tool_calls_total = 0
+        lineage_id = self._lineage_id_for_session_conn(conn, session_id)
         for msg in messages:
             role = msg.get("role", "unknown")
             tool_calls = msg.get("tool_calls")
@@ -3929,13 +4009,14 @@ class SessionDB:
             except (TypeError, ValueError):
                 comp_generation = 0
 
-            conn.execute(
+            cursor = conn.execute(
                 """INSERT INTO messages (session_id, role, content, tool_call_id,
                    tool_calls, tool_name, effect_disposition, timestamp, token_count, finish_reason,
                    reasoning, reasoning_content, reasoning_details, codex_reasoning_items,
                    codex_message_items, platform_message_id, observed, active, turn_id,
+                   created_at, lineage_id,
                    compression_generation)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     session_id,
                     role,
@@ -3956,9 +4037,16 @@ class SessionDB:
                     1 if msg.get("observed") else 0,
                     1,
                     msg.get("turn_id"),
+                    message_timestamp,
+                    lineage_id,
                     comp_generation,
                 ),
             )
+            if not msg.get("turn_id"):
+                conn.execute(
+                    "UPDATE messages SET turn_id = ? WHERE id = ?",
+                    (f"legacy:{cursor.lastrowid}", cursor.lastrowid),
+                )
             inserted += 1
             if tool_calls is not None:
                 tool_calls_total += (
@@ -4441,9 +4529,10 @@ class SessionDB:
         with self._lock:
             placeholders = ",".join("?" for _ in session_ids)
             rows = self._conn.execute(
-                "SELECT role, content, tool_call_id, tool_calls, tool_name, effect_disposition, "
+                "SELECT id, role, content, tool_call_id, tool_calls, tool_name, effect_disposition, "
                 "finish_reason, reasoning, reasoning_content, reasoning_details, "
-                "codex_reasoning_items, codex_message_items, platform_message_id, observed, timestamp "
+                "codex_reasoning_items, codex_message_items, platform_message_id, "
+                "observed, timestamp, turn_id, created_at, lineage_id, compression_generation "
                 f"FROM messages WHERE session_id IN ({placeholders})"
                 # Order by AUTOINCREMENT id (true insertion order), NOT timestamp:
                 # append_message stamps rows with time.time(), which is not
@@ -4465,6 +4554,12 @@ class SessionDB:
             msg = {"role": row["role"], "content": content}
             if row["timestamp"]:
                 msg["timestamp"] = row["timestamp"]
+            msg["created_at"] = row["created_at"] or row["timestamp"]
+            msg["lineage_id"] = row["lineage_id"] or self._lineage_id_for_session_conn(
+                self._conn, session_id
+            )
+            msg["turn_id"] = row["turn_id"] or f"legacy:{row['id']}"
+            msg["compression_generation"] = int(row["compression_generation"] or 0)
             if row["tool_call_id"]:
                 msg["tool_call_id"] = row["tool_call_id"]
             if row["tool_name"]:
@@ -5177,17 +5272,19 @@ class SessionDB:
         limit: int = 8,
         boundary_turn_id: str = None,
     ) -> List[Dict[str, Any]]:
-        """Search archived compacted rows for the current session.
+        """Search archived compacted rows for the current session lineage.
 
         This is intentionally narrower than ``search_messages``: it only reads
-        ``active=0, compacted=1`` rows from one durable session.  It is used by
-        post-compaction recovery to rebuild task state without treating older
-        current-session turns as live instructions.
+        ``active=0, compacted=1`` rows from the current compression lineage. It
+        is used by post-compaction recovery to rebuild task state without
+        treating older current-session turns as live instructions.
         """
         if not session_id or limit <= 0:
             return []
 
         sanitized_query = self._sanitize_fts5_query(query or "")
+        session_ids = self._session_lineage_root_to_tip(session_id)
+        placeholders = ",".join("?" for _ in session_ids)
         rows: List[Dict[str, Any]] = []
 
         if self._fts_enabled and sanitized_query:
@@ -5201,6 +5298,8 @@ class SessionDB:
                     m.tool_name,
                     m.tool_call_id,
                     m.turn_id,
+                    m.created_at,
+                    m.lineage_id,
                     m.compression_generation,
                     m.active,
                     m.compacted,
@@ -5209,12 +5308,12 @@ class SessionDB:
                 FROM messages_fts
                 JOIN messages m ON m.id = messages_fts.rowid
                 WHERE messages_fts MATCH ?
-                  AND m.session_id = ?
+                  AND m.session_id IN ({placeholders})
                   AND m.active = 0
                   AND m.compacted = 1
                 ORDER BY boundary_rank ASC, bm25_rank ASC, m.timestamp DESC, m.id DESC
                 LIMIT ?
-            """
+            """.format(placeholders=placeholders)
             with self._lock:
                 try:
                     rows = [
@@ -5225,7 +5324,7 @@ class SessionDB:
                                 boundary_turn_id or "",
                                 boundary_turn_id or "",
                                 sanitized_query,
-                                session_id,
+                                *session_ids,
                                 limit,
                             ),
                         ).fetchall()
@@ -5239,19 +5338,19 @@ class SessionDB:
                 boundary_rows = [
                     dict(row)
                     for row in self._conn.execute(
-                        """
+                        f"""
                         SELECT id, session_id, role, content, timestamp, tool_name,
-                               tool_call_id, turn_id, compression_generation,
-                               active, compacted
+                               tool_call_id, turn_id, created_at, lineage_id,
+                               compression_generation, active, compacted
                         FROM messages
-                        WHERE session_id = ?
+                        WHERE session_id IN ({placeholders})
                           AND turn_id = ?
                           AND active = 0
                           AND compacted = 1
                         ORDER BY timestamp DESC, id DESC
                         LIMIT 1
                         """,
-                        (session_id, boundary_turn_id),
+                        (*session_ids, boundary_turn_id),
                     ).fetchall()
                 ]
             for boundary_row in boundary_rows:
@@ -5264,18 +5363,18 @@ class SessionDB:
                 rows = [
                     dict(row)
                     for row in self._conn.execute(
-                        """
+                        f"""
                         SELECT id, session_id, role, content, timestamp, tool_name,
-                               tool_call_id, turn_id, compression_generation,
-                               active, compacted
+                               tool_call_id, turn_id, created_at, lineage_id,
+                               compression_generation, active, compacted
                         FROM messages
-                        WHERE session_id = ?
+                        WHERE session_id IN ({placeholders})
                           AND active = 0
                           AND compacted = 1
                         ORDER BY timestamp DESC, id DESC
                         LIMIT ?
                         """,
-                        (session_id, limit),
+                        (*session_ids, limit),
                     ).fetchall()
                 ]
 
@@ -5284,6 +5383,12 @@ class SessionDB:
                 row["content"] = self._decode_content(row["content"])
             if not row.get("turn_id"):
                 row["turn_id"] = f"legacy:{row.get('id')}"
+            if not row.get("created_at"):
+                row["created_at"] = row.get("timestamp")
+            if not row.get("lineage_id"):
+                row["lineage_id"] = self._lineage_id_for_session_conn(
+                    self._conn, row.get("session_id") or session_id
+                )
             if row.get("compression_generation") is None:
                 row["compression_generation"] = 0
         return rows

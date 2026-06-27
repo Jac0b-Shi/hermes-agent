@@ -852,6 +852,9 @@ def run_conversation(
             api_msg.pop("_thinking_prefill", None)
             # Persistence/recovery metadata is for SessionDB and archive
             # reconstruction only. Never send it as provider message fields.
+            api_msg.pop("timestamp", None)
+            api_msg.pop("created_at", None)
+            api_msg.pop("lineage_id", None)
             api_msg.pop("turn_id", None)
             api_msg.pop("compression_generation", None)
             # Strip Codex Responses API fields (call_id, response_item_id) for

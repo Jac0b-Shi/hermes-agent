@@ -378,6 +378,8 @@ def format_recovered_context_block(
                 f"role: {msg.get('role', '')}",
                 f"turn_id: {_message_turn_id(msg)}",
                 f"timestamp: {msg.get('timestamp', '')}",
+                f"created_at: {msg.get('created_at', msg.get('timestamp', ''))}",
+                f"lineage_id: {msg.get('lineage_id', '')}",
                 f"compression_generation: {msg.get('compression_generation', 0) or 0}",
                 f"message_id: {msg.get('id', '')}",
                 f"active: {msg.get('active', '')}",
