@@ -923,6 +923,8 @@ def build_assistant_message(agent, assistant_message, finish_reason: str) -> dic
         "content": _san_content,
         "reasoning": reasoning_text,
         "finish_reason": finish_reason,
+        "turn_id": getattr(agent, "_current_turn_id", None),
+        "compression_generation": int(getattr(agent, "_context_acquisition_generation", 0) or 0),
     }
 
     raw_reasoning_content = getattr(assistant_message, "reasoning_content", None)
@@ -1437,7 +1439,13 @@ def handle_max_iterations(agent, messages: list, api_call_count: int) -> str:
             # bypassing the transport — so mirror that sanitization here:
             # tool_name (SQLite FTS bookkeeping), the codex_* reasoning carriers,
             # and every Hermes-internal underscore-prefixed scaffolding key.
-            for schema_foreign in ("tool_name", "codex_reasoning_items", "codex_message_items"):
+            for schema_foreign in (
+                "tool_name",
+                "codex_reasoning_items",
+                "codex_message_items",
+                "turn_id",
+                "compression_generation",
+            ):
                 api_msg.pop(schema_foreign, None)
             for internal_key in [k for k in api_msg if isinstance(k, str) and k.startswith("_")]:
                 api_msg.pop(internal_key, None)

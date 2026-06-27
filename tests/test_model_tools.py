@@ -39,6 +39,40 @@ class TestHandleFunctionCall:
         assert len(parsed["error"]) > 0
         assert "error" in parsed["error"].lower() or "failed" in parsed["error"].lower()
 
+    def test_side_effect_tool_requires_context_evidence_before_dispatch(self):
+        from agent.context_acquisition import (
+            register_turn_safety_context,
+            unregister_turn_safety_context,
+        )
+
+        turn_id = "s1:2000:turn"
+        agent = type("Agent", (), {
+            "session_id": "s1",
+            "_context_acquisition_config": {
+                "enabled": True,
+                "verify_before_side_effects": True,
+            },
+            "_context_safety_evidence": [],
+        })()
+        register_turn_safety_context(agent, turn_id)
+        try:
+            with (
+                patch("model_tools.registry.dispatch") as mock_dispatch,
+                patch("hermes_cli.plugins.get_pre_tool_call_block_message", return_value=None),
+            ):
+                result = json.loads(handle_function_call(
+                    "write_file",
+                    {"path": "/tmp/example.py", "content": "x"},
+                    task_id="task-1",
+                    session_id="s1",
+                    turn_id=turn_id,
+                ))
+
+            assert result["status"] == "requires_context_verification"
+            mock_dispatch.assert_not_called()
+        finally:
+            unregister_turn_safety_context(turn_id)
+
     def test_tool_hooks_receive_session_and_tool_call_ids(self):
         with (
             patch("model_tools.registry.dispatch", return_value='{"ok":true}'),
