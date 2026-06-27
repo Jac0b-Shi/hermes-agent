@@ -4150,6 +4150,7 @@ _AUX_TASK_SLOTS: Tuple[str, ...] = (
     "vision",
     "web_extract",
     "compression",
+    "context_acquisition",
     "skills_hub",
     "approval",
     "mcp",

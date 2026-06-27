@@ -42,6 +42,25 @@ class TestSanitizeApiMessagesRoleFilter:
         assert "assistant" in roles
         assert "tool" in roles
 
+    def test_strips_context_recovery_metadata_fields(self):
+        msgs = [
+            {
+                "role": "user",
+                "content": "hello",
+                "turn_id": "s1:1000:turn",
+                "compression_generation": 2,
+            },
+            {
+                "role": "assistant",
+                "content": "hi",
+                "turn_id": "s1:1000:turn",
+                "compression_generation": 2,
+            },
+        ]
+        out = AIAgent._sanitize_api_messages(msgs)
+        assert all("turn_id" not in m for m in out)
+        assert all("compression_generation" not in m for m in out)
+
     def test_logs_warning_when_dropping(self, caplog):
         msgs = [
             {"role": "user", "content": "hello"},
