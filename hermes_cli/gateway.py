@@ -2514,6 +2514,154 @@ def get_python_path() -> str:
     return sys.executable
 
 
+def _needs_launchd_wrapper(python_path: str) -> bool:
+    """Check if launchd needs a wrapper script to run the Python binary.
+
+    On macOS, launchd may refuse to execute binaries (or symlinks to binaries)
+    that reside on external / non-system volumes (``/Volumes/…``).  The job
+    silently fails with ``exit code = 78: EX_CONFIG`` — no process is spawned,
+    no logs are written.
+
+    Returns ``True`` when *python_path* (or its symlink target) lives on an
+    external volume, so ``generate_launchd_plist()`` can emit a wrapper script
+    instead of the bare Python path.
+    """
+    if not is_macos():
+        return False
+    try:
+        resolved = Path(python_path).resolve()
+    except (OSError, ValueError):
+        return False
+    # Check the resolved path (follows symlinks) and the original
+    return (
+        str(resolved).startswith("/Volumes/")
+        or python_path.startswith("/Volumes/")
+    )
+
+
+def _create_launchd_wrapper(python_path: str, profile_arg: str) -> str:
+    """Create a shell wrapper for launchd and return its path.
+
+    The wrapper:
+    * sets HERMES_HOME, VIRTUAL_ENV, PATH (including ``uvx`` and plugin bins)
+    * sources plugin ``.env`` files so plugin env vars survive plist regen
+    * ``exec``\\s the real Python, replacing the shell process
+
+    The script is written to ``~/.local/bin/hermes-gateway-launchd.sh``
+    so it is profile-scoped and lives on the boot volume.
+    """
+    # The wrapper MUST live on the boot volume — if it's on /Volumes/Data/
+    # launchd will refuse to execute it (same exit-78 problem we're solving).
+    hermes_home = get_hermes_home()
+    bin_dir = Path.home() / ".local" / "bin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    wrapper_path = bin_dir / "hermes-gateway-launchd.sh"
+
+    venv_dir = _detect_venv_dir()
+    venv_str = str(venv_dir) if venv_dir else str(PROJECT_ROOT / "venv")
+
+    # Build PATH matching what generate_launchd_plist() puts in the plist
+    priority_dirs = _build_service_path_dirs()
+    resolved_node = shutil.which("node")
+    if resolved_node:
+        resolved_node_dir = str(Path(resolved_node).resolve().parent)
+        if resolved_node_dir not in priority_dirs:
+            priority_dirs.append(resolved_node_dir)
+    # Also include uv/uvx directory
+    resolved_uv = shutil.which("uvx") or shutil.which("uv")
+    if resolved_uv:
+        resolved_uv_dir = str(Path(resolved_uv).resolve().parent)
+        if resolved_uv_dir not in priority_dirs:
+            priority_dirs.append(resolved_uv_dir)
+    sane_path = ":".join(
+        dict.fromkeys(priority_dirs + [p for p in os.environ.get("PATH", "").split(":") if p])
+    )
+
+    # Discover plugin env files (e.g. MEMORY_TENCENTDB_GATEWAY_CMD).
+    # Read them at generation time and embed as `export` lines — launchd
+    # processes can't read files on external volumes ("operation not
+    # permitted"), so we bake the values into the wrapper script itself.
+    plugin_env_lines: list[str] = []
+    plugins_dir = hermes_home / "plugins"
+    if plugins_dir.is_dir():
+        for plugin_env in sorted(plugins_dir.glob("*/.env")):
+            plugin_env_lines.append(f'# Plugin env: {plugin_env.parent.name}')
+            try:
+                for raw_line in plugin_env.read_text(encoding="utf-8").splitlines():
+                    line = raw_line.strip()
+                    if not line or line.startswith("#") or line.startswith("="):
+                        continue
+                    if "=" in line:
+                        plugin_env_lines.append(f"export {line}")
+            except OSError:
+                plugin_env_lines.append(f"# (could not read {plugin_env})")
+
+    profile_args_str = f" {profile_arg}" if profile_arg else ""
+    plugin_env_block = "\n".join(plugin_env_lines) if plugin_env_lines else "# No plugin .env files found"
+
+    # Detect the mount point the Python binary lives on, so the wrapper
+    # can wait for it to appear before exec-ing.
+    resolved_python = str(Path(python_path).resolve())
+    mount_wait_lines: list[str] = []
+    check_paths = [python_path, resolved_python]
+    for candidate in ("/Volumes/", "/mnt/", "/media/"):
+        matched = next((p for p in check_paths if p.startswith(candidate)), None)
+        if matched:
+            mp = "/" + "/".join(matched.split("/")[1:3])
+            mount_wait_lines = [
+                f"# Wait for external volume to be mounted (user may mount it manually)",
+                f"_mount_point={shlex_quote(mp)}",
+                f'if ! mount | grep -q " on $_mount_point "; then',
+                f'  echo "[$_mount_point] not mounted — waiting (mount it manually)…" >&2',
+                f'  while ! mount | grep -q " on $_mount_point "; do',
+                f"    sleep 5",
+                f"  done",
+                f'  echo "[$_mount_point] mounted — starting gateway." >&2',
+                f"  sleep 2",
+                f"fi",
+                "",
+            ]
+            break
+    mount_wait_block = "\n".join(mount_wait_lines)
+
+    # Build the script as plain lines — no textwrap.dedent, which breaks
+    # when interpolated blocks (mount_wait_block) have different indentation
+    # than the template.
+    lines = [
+        "#!/bin/zsh",
+        "# Auto-generated by hermes — do not edit.",
+        "# Regenerated on every `hermes gateway start/install/restart`.",
+        "set -eu",
+        "",
+    ]
+    if mount_wait_block:
+        lines.append(mount_wait_block)
+    lines.extend([
+        f"export HERMES_HOME={shlex_quote(str(hermes_home))}",
+        f"export VIRTUAL_ENV={shlex_quote(venv_str)}",
+        f"export PATH={shlex_quote(sane_path)}",
+        "",
+        "# Plugin environment variables",
+        plugin_env_block,
+        "",
+        f"cd {shlex_quote(str(PROJECT_ROOT))}",
+        "",
+        f"exec {shlex_quote(python_path)} -m hermes_cli.main{profile_args_str} gateway run --replace",
+        "",
+    ])
+    script = "\n".join(lines)
+
+    wrapper_path.write_text(script, encoding="utf-8")
+    wrapper_path.chmod(0o755)
+    return str(wrapper_path)
+
+
+def shlex_quote(s: str) -> str:
+    """Minimal shell-quoting (``shlex.quote`` without the import dance)."""
+    import shlex as _shlex
+    return _shlex.quote(s)
+
+
 # =============================================================================
 # Systemd (Linux)
 # =============================================================================
@@ -3901,29 +4049,68 @@ def generate_launchd_plist() -> str:
         resolved_node_dir = str(Path(resolved_node).parent)
         if resolved_node_dir not in priority_dirs:
             priority_dirs.append(resolved_node_dir)
+    # Also include uv/uvx directory
+    resolved_uv = shutil.which("uvx") or shutil.which("uv")
+    if resolved_uv:
+        resolved_uv_dir = str(Path(resolved_uv).resolve().parent)
+        if resolved_uv_dir not in priority_dirs:
+            priority_dirs.append(resolved_uv_dir)
     sane_path = ":".join(
         dict.fromkeys(
             priority_dirs + [p for p in os.environ.get("PATH", "").split(":") if p]
         )
     )
 
-    # Build ProgramArguments array, including --profile when using a named profile
-    prog_args = [
-        f"<string>{python_path}</string>",
-        "<string>-m</string>",
-        "<string>hermes_cli.main</string>",
-    ]
-    if profile_arg:
-        for part in profile_arg.split():
-            prog_args.append(f"<string>{part}</string>")
-    prog_args.extend(
-        [
+    # When the Python binary lives on an external / non-system volume
+    # (e.g. /Volumes/Data/…), launchd may refuse to execute it (exit 78).
+    # In that case, use a shell wrapper script instead.
+    use_wrapper = _needs_launchd_wrapper(python_path)
+    if use_wrapper:
+        wrapper_path = _create_launchd_wrapper(python_path, profile_arg)
+        prog_args = [
+            "<string>/bin/zsh</string>",
+            f"<string>{wrapper_path}</string>",
+        ]
+    else:
+        # Build ProgramArguments array, including --profile when using a named profile
+        prog_args = [
+            f"<string>{python_path}</string>",
+            "<string>-m</string>",
+            "<string>hermes_cli.main</string>",
+        ]
+        if profile_arg:
+            for part in profile_arg.split():
+                prog_args.append(f"<string>{part}</string>")
+        prog_args.extend([
             "<string>gateway</string>",
             "<string>run</string>",
             "<string>--replace</string>",
-        ]
-    )
+        ])
     prog_args_xml = "\n        ".join(prog_args)
+
+    # When using a wrapper, the script itself exports HERMES_HOME, VIRTUAL_ENV,
+    # PATH, and plugin env vars — the plist only needs PATH for launchd's own
+    # process-spawning overhead.
+    # Also: log paths and WorkingDirectory must be on the boot volume when
+    # using a wrapper — launchd may check these paths before the external
+    # volume is mounted, causing exit 78.
+    if use_wrapper:
+        env_vars_xml = f"""
+        <key>PATH</key>
+        <string>{sane_path}</string>"""
+        log_dir_str = str(Path.home() / "Library" / "Logs")
+        Path(log_dir_str).mkdir(parents=True, exist_ok=True)
+        working_dir_str = str(PROJECT_ROOT)
+    else:
+        env_vars_xml = f"""
+        <key>PATH</key>
+        <string>{sane_path}</string>
+        <key>VIRTUAL_ENV</key>
+        <string>{venv_dir}</string>
+        <key>HERMES_HOME</key>
+        <string>{hermes_home}</string>"""
+        log_dir_str = str(log_dir)
+        working_dir_str = str(working_dir)
 
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -3936,18 +4123,9 @@ def generate_launchd_plist() -> str:
     <array>
         {prog_args_xml}
     </array>
-    
-    <key>WorkingDirectory</key>
-    <string>{working_dir}</string>
-    
+
     <key>EnvironmentVariables</key>
-    <dict>
-        <key>PATH</key>
-        <string>{sane_path}</string>
-        <key>VIRTUAL_ENV</key>
-        <string>{venv_dir}</string>
-        <key>HERMES_HOME</key>
-        <string>{hermes_home}</string>
+    <dict>{env_vars_xml}
     </dict>
 
     <key>LimitLoadToSessionType</key>
@@ -3955,18 +4133,18 @@ def generate_launchd_plist() -> str:
         <string>Aqua</string>
         <string>Background</string>
     </array>
-    
+
     <key>RunAtLoad</key>
     <true/>
-    
+
     <key>KeepAlive</key>
     <true/>
-    
+
     <key>StandardOutPath</key>
-    <string>{log_dir}/gateway.log</string>
-    
+    <string>{log_dir_str}/gateway.log</string>
+
     <key>StandardErrorPath</key>
-    <string>{log_dir}/gateway.error.log</string>
+    <string>{log_dir_str}/gateway.error.log</string>
 </dict>
 </plist>
 """
