@@ -1227,6 +1227,48 @@ def handle_function_call(
             if function_name in {"write_file", "patch"}:
                 return json.dumps({"error": "Edit approval denied: approval guard failed"}, ensure_ascii=False)
 
+        # ── Command denylist: hard-block dangerous system-integrity commands ──
+        # This runs BEFORE action safety because it's always enforced and
+        # does not depend on session context, compaction state, or evidence.
+        # Blocked commands (tccutil reset, TCC.db access) are never executed.
+        try:
+            from agent.context_acquisition import enforce_command_denylist
+
+            _denylist_block = enforce_command_denylist(function_name, function_args)
+        except Exception as _denylist_err:
+            logger.exception("command denylist guard failed")
+            # Fail-closed: if the denylist itself crashes, block ALL terminal
+            # commands rather than silently allowing them.
+            if function_name == "terminal":
+                _denylist_block = json.dumps(
+                    {
+                        "status": "command_denied",
+                        "error_type": "denylist_guard_failed",
+                        "message": (
+                            "命令安全检查器异常，已按 fail-closed 策略拒绝执行"
+                        ),
+                    },
+                    ensure_ascii=False,
+                )
+            else:
+                _denylist_block = None
+        if _denylist_block is not None:
+            _emit_post_tool_call_hook(
+                function_name=function_name,
+                function_args=function_args,
+                result=_denylist_block,
+                task_id=task_id,
+                session_id=session_id,
+                tool_call_id=tool_call_id,
+                turn_id=turn_id,
+                api_request_id=api_request_id,
+                status="blocked",
+                error_type="command_denied",
+                error_message="Dangerous system-integrity command blocked by denylist",
+                middleware_trace=list(_tool_middleware_trace),
+            )
+            return _denylist_block
+
         try:
             from agent.context_acquisition import enforce_action_safety
 

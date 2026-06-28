@@ -5287,7 +5287,131 @@ class SessionDB:
         placeholders = ",".join("?" for _ in session_ids)
         rows: List[Dict[str, Any]] = []
 
-        if self._fts_enabled and sanitized_query:
+        def _mark_search_path(result_rows: List[Dict[str, Any]], path: str) -> None:
+            for result_row in result_rows:
+                result_row["search_path"] = path
+
+        if sanitized_query and self._contains_cjk(sanitized_query):
+            raw_query = sanitized_query.strip('"').strip()
+            cjk_count = self._count_cjk(raw_query)
+            tokens_for_check = [
+                token for token in raw_query.split()
+                if token.upper() not in {"AND", "OR", "NOT"} and self._contains_cjk(token)
+            ]
+            any_short_cjk = any(self._count_cjk(token) < 3 for token in tokens_for_check)
+            trigram_succeeded = False
+
+            if cjk_count >= 3 and not any_short_cjk and self._trigram_available:
+                tokens = raw_query.split()
+                parts = []
+                for token in tokens:
+                    if token.upper() in {"AND", "OR", "NOT"}:
+                        parts.append(token)
+                    else:
+                        parts.append('"' + token.replace('"', '""') + '"')
+                trigram_query = " ".join(parts)
+                sql = """
+                    SELECT
+                        m.id,
+                        m.session_id,
+                        m.role,
+                        m.content,
+                        m.timestamp,
+                        m.tool_name,
+                        m.tool_call_id,
+                        m.turn_id,
+                        m.created_at,
+                        m.lineage_id,
+                        m.compression_generation,
+                        m.active,
+                        m.compacted,
+                        bm25(messages_fts_trigram) AS bm25_rank,
+                        CASE WHEN ? != '' AND m.turn_id = ? THEN 0 ELSE 1 END AS boundary_rank
+                    FROM messages_fts_trigram
+                    JOIN messages m ON m.id = messages_fts_trigram.rowid
+                    WHERE messages_fts_trigram MATCH ?
+                      AND m.session_id IN ({placeholders})
+                      AND m.active = 0
+                      AND m.compacted = 1
+                    ORDER BY boundary_rank ASC, bm25_rank ASC, m.timestamp DESC, m.id DESC
+                    LIMIT ?
+                """.format(placeholders=placeholders)
+                with self._lock:
+                    try:
+                        rows = [
+                            dict(row)
+                            for row in self._conn.execute(
+                                sql,
+                                (
+                                    boundary_turn_id or "",
+                                    boundary_turn_id or "",
+                                    trigram_query,
+                                    *session_ids,
+                                    limit,
+                                ),
+                            ).fetchall()
+                        ]
+                        _mark_search_path(rows, "cjk_trigram")
+                        trigram_succeeded = True
+                    except sqlite3.OperationalError:
+                        rows = []
+
+            if not trigram_succeeded:
+                non_op_tokens = [
+                    token for token in raw_query.split()
+                    if token.upper() not in {"AND", "OR", "NOT"}
+                ] or [raw_query]
+                token_clauses = []
+                like_params: list = []
+                for token in non_op_tokens:
+                    esc = token.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+                    token_clauses.append(
+                        "(m.content LIKE ? ESCAPE '\\' OR m.tool_name LIKE ? ESCAPE '\\' OR m.tool_calls LIKE ? ESCAPE '\\')"
+                    )
+                    like_params.extend((f"%{esc}%", f"%{esc}%", f"%{esc}%"))
+                sql = """
+                    SELECT
+                        m.id,
+                        m.session_id,
+                        m.role,
+                        m.content,
+                        m.timestamp,
+                        m.tool_name,
+                        m.tool_call_id,
+                        m.turn_id,
+                        m.created_at,
+                        m.lineage_id,
+                        m.compression_generation,
+                        m.active,
+                        m.compacted,
+                        CASE WHEN ? != '' AND m.turn_id = ? THEN 0 ELSE 1 END AS boundary_rank
+                    FROM messages m
+                    WHERE ({token_sql})
+                      AND m.session_id IN ({placeholders})
+                      AND m.active = 0
+                      AND m.compacted = 1
+                    ORDER BY boundary_rank ASC, m.timestamp DESC, m.id DESC
+                    LIMIT ?
+                """.format(
+                    token_sql=" OR ".join(token_clauses),
+                    placeholders=placeholders,
+                )
+                with self._lock:
+                    rows = [
+                        dict(row)
+                        for row in self._conn.execute(
+                            sql,
+                            (
+                                boundary_turn_id or "",
+                                boundary_turn_id or "",
+                                *like_params,
+                                *session_ids,
+                                limit,
+                            ),
+                        ).fetchall()
+                    ]
+                    _mark_search_path(rows, "cjk_like")
+        elif self._fts_enabled and sanitized_query:
             sql = """
                 SELECT
                     m.id,
@@ -5329,6 +5453,7 @@ class SessionDB:
                             ),
                         ).fetchall()
                     ]
+                    _mark_search_path(rows, "fts")
                 except sqlite3.OperationalError:
                     rows = []
 
@@ -5354,6 +5479,7 @@ class SessionDB:
                     ).fetchall()
                 ]
             for boundary_row in boundary_rows:
+                boundary_row.setdefault("search_path", "boundary")
                 if boundary_row.get("id") not in seen_ids:
                     rows.insert(0, boundary_row)
                     seen_ids.add(boundary_row.get("id"))
@@ -5377,6 +5503,7 @@ class SessionDB:
                         (*session_ids, limit),
                     ).fetchall()
                 ]
+                _mark_search_path(rows, "recency")
 
         for row in rows:
             if "content" in row:

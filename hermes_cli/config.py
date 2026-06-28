@@ -1493,6 +1493,12 @@ DEFAULT_CONFIG = {
         "recent_verbatim_turns": 6,
         "inject_recovery_instruction": True,
         "verify_before_side_effects": True,
+        "action_safety_mode": "auto", # off | warn | strict | auto. Auto is strict only
+                                      # when archive recovery injected evidence in this turn.
+        "router_max_calls_per_compaction": 1,
+        "router_min_summary_chars": 120,
+        "router_cache_ttl_seconds": 300,
+        "recovered_context_mode": "compact", # compact | full. Full is mostly for debugging.
         "project_context_cache": True,
         "debug": False,
     },

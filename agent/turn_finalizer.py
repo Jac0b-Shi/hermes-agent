@@ -537,7 +537,7 @@ def finalize_turn(
     try:
         from agent.context_acquisition import unregister_turn_safety_context
 
-        unregister_turn_safety_context(turn_id)
+        unregister_turn_safety_context(turn_id, session_id=agent.session_id)
     except Exception:
         logger.debug("context safety unregister failed", exc_info=True)
 
