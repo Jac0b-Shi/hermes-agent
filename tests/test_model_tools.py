@@ -51,6 +51,7 @@ class TestHandleFunctionCall:
             "_context_acquisition_config": {
                 "enabled": True,
                 "verify_before_side_effects": True,
+                "action_safety_mode": "strict",
             },
             "_context_safety_evidence": [],
         })()
@@ -71,7 +72,7 @@ class TestHandleFunctionCall:
             assert result["status"] == "requires_context_verification"
             mock_dispatch.assert_not_called()
         finally:
-            unregister_turn_safety_context(turn_id)
+            unregister_turn_safety_context(turn_id, session_id="s1")
 
     def test_tool_hooks_receive_session_and_tool_call_ids(self):
         with (
@@ -234,6 +235,261 @@ class TestHandleFunctionCall:
         post_call = next(call for call in hook_calls if call[0] == "post_tool_call")
         assert pre_call[1]["middleware_trace"] == expected_trace
         assert post_call[1]["middleware_trace"] == expected_trace
+
+    # ── Command denylist ──
+
+    def test_tccutil_reset_all_forms_are_blocked(self):
+        blocked_cmds = [
+            "tccutil reset SystemPolicyAllFiles",
+            "/usr/bin/tccutil reset SystemPolicyAllFiles",
+            "tccutil reset All",
+            "tccutil reset systempolicyallfiles",
+            "sudo tccutil reset SystemPolicyAllFiles",
+            "sudo /usr/bin/tccutil reset SystemPolicyAllFiles",
+            "sudo -n tccutil reset Accessibility",
+            "env tccutil reset SystemPolicyAllFiles",
+            "env -i tccutil reset Accessibility",
+            "command tccutil reset Accessibility",
+            "command -p tccutil reset Accessibility",
+            "arch -arm64 /usr/bin/tccutil reset Accessibility",
+            "nice -n 10 tccutil reset Accessibility",
+            "nohup tccutil reset Accessibility",
+            "tccutil reset Accessibility",
+            "tccutil reset Camera",
+            "tccutil reset ScreenCapture",
+            "tccutil reset Microphone",
+            "tccutil reset AppleEvents",
+            "tccutil reset ListenEvent",
+            "tccutil reset PostEvent",
+            "tccutil reset DeveloperTool",
+            "tccutil reset RemoteDesktop",
+            "tccutil reset SpeechRecognition",
+            "tccutil reset BluetoothAlways",
+        ]
+        for cmd in blocked_cmds:
+            result = json.loads(handle_function_call(
+                "terminal",
+                {"command": cmd},
+                task_id="t1",
+                tool_call_id="tc1",
+                session_id="s1",
+            ))
+            assert result["status"] == "command_denied", f"Expected block for: {cmd}"
+            assert result["error_type"] == "dangerous_tcc_reset", f"Unexpected error_type for: {cmd}"
+
+    def test_tccutil_reset_unknown_service_still_blocked(self):
+        result = json.loads(handle_function_call(
+            "terminal",
+            {"command": "tccutil reset SomeUnknownService"},
+            task_id="t1",
+            tool_call_id="tc1",
+        ))
+        assert result["status"] == "command_denied"
+        assert result["error_type"] == "dangerous_tcc_reset"
+
+    def test_tccutil_non_reset_subcommand_is_not_blocked(self):
+        safe = [
+            "tccutil status SystemPolicyAllFiles",
+            "tccutil list",
+            "tccutil status",
+        ]
+        for cmd in safe:
+            result = json.loads(handle_function_call(
+                "terminal",
+                {"command": cmd},
+                task_id="t1",
+                tool_call_id="tc1",
+            ))
+            assert result.get("status") != "command_denied", f"Should not block: {cmd}"
+
+    def test_tcc_db_path_access_is_blocked(self):
+        blocked_paths = [
+            "cat ~/Library/Application Support/com.apple.TCC/TCC.db",
+            "sqlite3 /Library/Application Support/com.apple.TCC/TCC.db",
+            "ls -la ~/Library/Application\\ Support/com.apple.TCC/TCC.db",
+            "sqlite3 ~/Library/Application\\ Support/com.apple.TCC/TCC.db 'select * from access'",
+        ]
+        for cmd in blocked_paths:
+            result = json.loads(handle_function_call(
+                "terminal",
+                {"command": cmd},
+                task_id="t1",
+                tool_call_id="tc1",
+                session_id="s1",
+            ))
+            assert result["status"] == "command_denied", f"Expected block for: {cmd}"
+            assert result["error_type"] == "dangerous_tcc_db_access", f"Unexpected error_type for: {cmd}"
+
+    def test_shell_wrapper_tccutil_is_blocked(self):
+        """sh -c / zsh -lc / bash --login -c wrappers are caught."""
+        blocked_cmds = [
+            "sh -c 'tccutil reset Accessibility'",
+            "/bin/sh -c 'tccutil reset SystemPolicyAllFiles'",
+            "zsh -lc 'tccutil reset All'",
+            "/bin/zsh -c 'tccutil reset Camera'",
+            "bash -l -c 'tccutil reset Accessibility'",
+            "zsh -f -c 'tccutil reset Accessibility'",
+            "bash --login -c 'tccutil reset Accessibility'",
+        ]
+        for cmd in blocked_cmds:
+            result = json.loads(handle_function_call(
+                "terminal",
+                {"command": cmd},
+                task_id="t1",
+                tool_call_id="tc1",
+                session_id="s1",
+            ))
+            assert result["status"] == "command_denied", f"Expected block for: {cmd}"
+            assert result["error_type"] == "dangerous_tcc_reset", f"Unexpected error_type for: {cmd}"
+
+    def test_profiles_install_remove_is_blocked(self):
+        blocked = [
+            "profiles install -path /tmp/bad.mobileconfig",
+            "sudo profiles remove -all",
+            "profiles renew -type enrollment",
+        ]
+        for cmd in blocked:
+            result = json.loads(handle_function_call(
+                "terminal",
+                {"command": cmd},
+                task_id="t1",
+                tool_call_id="tc1",
+            ))
+            assert result["status"] == "command_denied", f"Expected block for: {cmd}"
+            assert result["error_type"] == "dangerous_profiles_tampering", f"Unexpected: {cmd}"
+
+    def test_profiles_list_and_validate_are_not_blocked(self):
+        safe = ["profiles list", "profiles validate -type enrollment"]
+        for cmd in safe:
+            result = json.loads(handle_function_call(
+                "terminal",
+                {"command": cmd},
+                task_id="t1",
+                tool_call_id="tc1",
+            ))
+            assert result.get("status") != "command_denied", f"Should not block: {cmd}"
+
+    def test_osascript_is_always_blocked(self):
+        blocked = [
+            "osascript -e 'tell app System Events to display dialog'",
+            "/usr/bin/osascript script.scpt",
+        ]
+        for cmd in blocked:
+            result = json.loads(handle_function_call(
+                "terminal",
+                {"command": cmd},
+                task_id="t1",
+                tool_call_id="tc1",
+            ))
+            assert result["status"] == "command_denied", f"Expected block for: {cmd}"
+            assert result["error_type"] == "dangerous_applescript", f"Unexpected: {cmd}"
+
+    def test_open_systemprefs_is_blocked(self):
+        blocked = [
+            "open x-apple.systempreferences:com.apple.preference.security",
+            "open x-apple.systempreferences:com.apple.preferences",
+        ]
+        for cmd in blocked:
+            result = json.loads(handle_function_call(
+                "terminal",
+                {"command": cmd},
+                task_id="t1",
+                tool_call_id="tc1",
+            ))
+            assert result["status"] == "command_denied", f"Expected block for: {cmd}"
+            assert result["error_type"] == "dangerous_systemprefs_open", f"Unexpected: {cmd}"
+
+    def test_csrutil_is_blocked(self):
+        blocked = ["csrutil disable", "csrutil enable --without fs", "sudo csrutil clear"]
+        for cmd in blocked:
+            result = json.loads(handle_function_call(
+                "terminal",
+                {"command": cmd},
+                task_id="t1",
+                tool_call_id="tc1",
+            ))
+            assert result["status"] == "command_denied", f"Expected block for: {cmd}"
+            assert result["error_type"] == "dangerous_sip_tampering", f"Unexpected: {cmd}"
+
+    def test_spctl_master_disable_is_blocked(self):
+        blocked = [
+            "spctl --master-disable",
+            "sudo spctl --master-disable",
+        ]
+        for cmd in blocked:
+            result = json.loads(handle_function_call(
+                "terminal",
+                {"command": cmd},
+                task_id="t1",
+                tool_call_id="tc1",
+            ))
+            assert result["status"] == "command_denied", f"Expected block for: {cmd}"
+            assert result["error_type"] == "dangerous_gatekeeper_disable"
+
+    def test_systemextensionsctl_uninstall_is_blocked(self):
+        blocked = [
+            "systemextensionsctl uninstall TEAMID com.example.ext",
+            "systemextensionsctl reset",
+        ]
+        for cmd in blocked:
+            result = json.loads(handle_function_call(
+                "terminal",
+                {"command": cmd},
+                task_id="t1",
+                tool_call_id="tc1",
+            ))
+            assert result["status"] == "command_denied", f"Expected block for: {cmd}"
+            assert result["error_type"] == "dangerous_systemextensions_tampering"
+
+    def test_interpreter_inline_is_blocked(self):
+        blocked = [
+            "python -c 'import subprocess; subprocess.run([\"tccutil\",\"reset\"])'",
+            "python3 -c 'print(1)'",
+            "node -e 'console.log(1)'",
+            "ruby -e 'puts 1'",
+            "perl -e 'print 1'",
+            "swift -e 'print(1)'",
+        ]
+        for cmd in blocked:
+            result = json.loads(handle_function_call(
+                "terminal",
+                {"command": cmd},
+                task_id="t1",
+                tool_call_id="tc1",
+            ))
+            assert result["status"] == "command_denied", f"Expected block for: {cmd}"
+            assert result["error_type"] == "dangerous_interpreter_inline"
+
+    def test_non_terminal_tools_are_not_checked(self):
+        from agent.context_acquisition import enforce_command_denylist
+        block = enforce_command_denylist(
+            "write_file",
+            {"path": "tccutil", "content": "reset"},
+        )
+        assert block is None
+
+    def test_empty_and_non_matching_commands_pass(self):
+        safe_cmds = [
+            "",
+            "git status",
+            "echo hello",
+            "npm install",
+            "open https://example.com",
+            "tccutil status",
+            "profiles list",
+            "profiles validate -type enrollment",
+            "spctl --assess /Applications/App.app",
+            "systemextensionsctl list",
+            "python script.py",
+        ]
+        for cmd in safe_cmds:
+            result = json.loads(handle_function_call(
+                "terminal",
+                {"command": cmd},
+                task_id="t1",
+                tool_call_id="tc1",
+            ))
+            assert result.get("status") != "command_denied", f"Should not block: {cmd}"
 
 
 # =========================================================================
