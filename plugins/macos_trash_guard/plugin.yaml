@@ -1,0 +1,7 @@
+name: macos-trash-guard
+version: "0.1.0"
+description: "Block direct delete commands on local macOS and direct agents to use trash instead."
+author: hermes-agent
+kind: backend
+provides_hooks:
+  - pre_tool_call
