@@ -282,6 +282,10 @@ HARDLINE_PATTERNS = [
     (_CMDPOS + r'init\s+[06]\b', "init 0/6 (shutdown/reboot)"),
     (_CMDPOS + r'systemctl\s+(poweroff|reboot|halt|kexec)\b', "systemctl poweroff/reboot"),
     (_CMDPOS + r'telinit\s+[06]\b', "telinit 0/6 (shutdown/reboot)"),
+    # osascript Trash operations — hard-block to prevent silent data loss
+    (r'\bosascript\b.*\b(empty|remove)\b.*\b(trash|废纸篓)\b', "osascript trash operation"),
+    (r'\bosascript\b.*\btrash\b', "osascript trash operation"),
+    (r'\bosascript\b.*\bFinder\b.*\b(empty|remove|delete)\b', "osascript Finder destructive operation"),
 ]
 
 # Pre-compiled variant used by the hot-path matcher. Building these at module
