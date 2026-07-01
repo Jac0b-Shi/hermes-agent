@@ -265,6 +265,16 @@ class TestHandleFunctionCall:
             "tccutil reset RemoteDesktop",
             "tccutil reset SpeechRecognition",
             "tccutil reset BluetoothAlways",
+            # sudo/env option-argument bypass variants
+            "env -u FOO tccutil reset Accessibility",
+            "sudo -g staff tccutil reset Accessibility",
+            "sudo -p prompt tccutil reset Accessibility",
+            "env --unset FOO tccutil reset Accessibility",
+            # env interleaved: options mixed with assignments
+            "env -u FOO BAR=baz tccutil reset Accessibility",
+            "env -i BAR=baz tccutil reset Accessibility",
+            # env -S split-string bypass
+            'env -S "tccutil reset Accessibility"',
         ]
         for cmd in blocked_cmds:
             result = json.loads(handle_function_call(
