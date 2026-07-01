@@ -171,62 +171,9 @@ _DENY_INTERPRETER_INLINE: Tuple[Tuple[str, str], ...] = (
 
 
 # ── Strip command prefixes (sudo/env/command/arch/nice/nohup) ──────────
-def _strip_cmd_prefixes(argv: List[str]) -> List[str]:
-    """Remove sudo/env/command/arch/nice/nohup and their options from *argv*.
-
-    Returns a new list with the real command at position 0.  Prefixes
-    with unknown options are conservatively replaced with a sentinel to
-    signal that the command structure is too complex to safely match.
-    """
-    out = list(argv)
-    while out:
-        exe = os.path.basename(out[0]).lower()
-
-        if exe == "sudo":
-            out = out[1:]
-            # sudo -u user … / sudo -n … — complex, but strip simple -flag variants
-            while out and out[0].startswith("-"):
-                flag = out[0]
-                out = out[1:]
-                # sudo -u <user> consumes the next arg
-                if flag in ("-u", "--user") and out:
-                    out = out[1:]
-            continue
-
-        if exe == "env":
-            out = out[1:]
-            # env -i … / env -u VAR … plus VAR=value pairs
-            while out and "=" in out[0] and not out[0].startswith("-"):
-                out = out[1:]
-            while out and out[0].startswith("-"):
-                out = out[1:]
-            continue
-
-        if exe == "command":
-            out = out[1:]
-            while out and out[0].startswith("-"):
-                out = out[1:]
-            continue
-
-        if exe == "arch":
-            out = out[1:]
-            while out and out[0].startswith("-"):
-                out = out[1:]
-            continue
-
-        if exe in {"nice", "nohup"}:
-            out = out[1:]
-            # nice -n 10 — skip -n and its numeric arg
-            while out and out[0].startswith("-"):
-                flag = out[0]
-                out = out[1:]
-                if flag == "-n" and out:
-                    out = out[1:]
-            continue
-
-        break
-
-    return out
+# Delegated to the shared helper in hermes_cli/tool_policy/shell_words.py
+# so that the core provider and legacy denylist stay in sync.
+from hermes_cli.tool_policy.shell_words import strip_command_prefixes as _strip_cmd_prefixes
 
 
 # ── Shell wrappers ─────────────────────────────────────────────────────
@@ -314,6 +261,10 @@ def _check_argv(raw_cmd: str, argv: List[str]) -> Optional[str]:
 
     if not exe_parts:
         return None
+
+    # Sentinel from env -S parse failure → block
+    if exe_parts == ["__unsafe_env_split_string__"]:
+        return _denied("command_parse_error", "无法安全解析 env -S 命令，拒绝执行", raw_cmd)
 
     exe_basename = os.path.basename(exe_parts[0]).lower()
 

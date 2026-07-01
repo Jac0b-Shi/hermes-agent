@@ -1227,6 +1227,47 @@ def handle_function_call(
             if function_name in {"write_file", "patch"}:
                 return json.dumps({"error": "Edit approval denied: approval guard failed"}, ensure_ascii=False)
 
+        # ── Core tool-call policy engine ──────────────────────────────────
+        # Runs BEFORE the inline denylist and before ordinary pre_tool_call
+        # plugin hooks.  The engine is fail-closed — provider crashes will
+        # block the tool call.  System-integrity rules (TCC reset, SIP,
+        # Gatekeeper, system extensions, etc.) live here as providers.
+        try:
+            from hermes_cli.tool_policy.engine import enforce_core_tool_policy
+
+            _core_block = enforce_core_tool_policy(
+                function_name,
+                function_args,
+                session_id=session_id or "",
+                turn_id=turn_id or "",
+            )
+        except Exception as _core_err:
+            logger.exception("core policy engine failed")
+            _core_block = json.dumps(
+                {
+                    "status": "command_denied",
+                    "error_type": "core_policy_engine_failed",
+                    "message": "核心安全检查引擎异常，已按 fail-closed 策略拒绝执行",
+                },
+                ensure_ascii=False,
+            ) if function_name == "terminal" else None
+        if _core_block is not None:
+            _emit_post_tool_call_hook(
+                function_name=function_name,
+                function_args=function_args,
+                result=_core_block,
+                task_id=task_id,
+                session_id=session_id,
+                tool_call_id=tool_call_id,
+                turn_id=turn_id,
+                api_request_id=api_request_id,
+                status="blocked",
+                error_type="core_policy_blocked",
+                error_message="Tool call blocked by core policy engine",
+                middleware_trace=list(_tool_middleware_trace),
+            )
+            return _core_block
+
         # ── Command denylist: hard-block dangerous system-integrity commands ──
         # This runs BEFORE action safety because it's always enforced and
         # does not depend on session context, compaction state, or evidence.
