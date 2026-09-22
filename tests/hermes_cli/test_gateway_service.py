@@ -33,7 +33,11 @@ def _osascript_exec_argv(program_args: list[str]) -> list[str]:
     prefix, suffix = 'do shell script "', '"'
     assert script.startswith(prefix) and script.endswith(suffix), script
     shell = re.sub(r"\\(.)", r"\1", script[len(prefix):-len(suffix)])
-    exec_, *argv = shlex.split(shell)
+    words = shlex.split(shell)
+    # Optional external-volume mount-wait prologue before the real `exec …` (launchd_program_arguments).
+    if "exec" in words:
+        words = words[words.index("exec"):]
+    exec_, *argv = words
     assert exec_ == "exec", shell
     return argv
 

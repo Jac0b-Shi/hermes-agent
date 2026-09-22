@@ -212,6 +212,32 @@ def _gateway_run_command() -> list[str]:
     return [_gw().get_python_path(), "-m", "hermes_cli.main", *_gw()._profile_arg().split(), "gateway", "run", "--replace"]
 
 
+def _external_volume_wait_prefix(command: list[str]) -> str:
+    """Shell prefix that waits for an external volume holding *command*'s executable.
+
+    launchd now starts the job via ``/usr/bin/osascript`` (Local Network Privacy), so it no
+    longer execs a ``/Volumes/...`` binary as the job's first executable. The inner shell still
+    does, so a boot-time job whose volume is not yet mounted would exit immediately. Only this
+    wait is grafted in — never replace osascript with a zsh trampoline (#71206).
+    """
+    if not command:
+        return ""
+    exe = command[0]
+    try:
+        resolved = str(Path(exe).resolve())
+    except (OSError, ValueError):
+        resolved = exe
+    matched = next((p for p in (exe, resolved) if p.startswith("/Volumes/")), None)
+    if not matched:
+        return ""
+    mount_point = "/" + "/".join(matched.split("/")[1:3])
+    return (
+        f"while [ ! -e {shlex.quote(exe)} ]; do "
+        f"echo '[{mount_point}] not mounted - waiting (mount it manually)...' >&2; "
+        f"sleep 5; done; sleep 1; "
+    )
+
+
 def launchd_program_arguments(command: list[str], stdout_log: Path, stderr_log: Path) -> list[str]:
     """launchd ``ProgramArguments`` that run ``command`` with a Local Network identity macOS accepts (#71206).
 
@@ -230,7 +256,11 @@ def launchd_program_arguments(command: list[str], stdout_log: Path, stderr_log: 
     deliver SIGTERM to it and KeepAlive's ``SuccessfulExit`` semantics are preserved (osascript exits 0
     exactly when the shell did).
     """
-    shell = f"exec {shlex.join(command)} >> {shlex.quote(str(stdout_log))} 2>> {shlex.quote(str(stderr_log))}"
+    wait = _external_volume_wait_prefix(command)
+    shell = (
+        f"{wait}exec {shlex.join(command)} >> {shlex.quote(str(stdout_log))} "
+        f"2>> {shlex.quote(str(stderr_log))}"
+    )
     applescript = shell.replace("\\", "\\\\").replace('"', '\\"')
     return ["/usr/bin/osascript", "-e", f'do shell script "{applescript}"']
 
@@ -329,6 +359,10 @@ def _launchd_degrade_or_raise(exc: subprocess.CalledProcessError, what: str) -> 
 def generate_launchd_plist() -> str:
     # Stable cwd anchor — never the volatile source checkout (same rot risk as systemd's WorkingDirectory).
     working_dir = _gw()._stable_service_working_dir()
+    # launchd CHDIR's before osascript runs; an unmounted external volume would fail
+    # the job before the mount-wait in launchd_program_arguments can help.
+    if str(working_dir).startswith("/Volumes/") and not Path(working_dir).is_dir():
+        working_dir = str(Path.home())
     hermes_home = str(_gw().get_hermes_home().resolve())
     log_dir = _gw().get_hermes_home() / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
