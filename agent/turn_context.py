@@ -79,7 +79,10 @@ def _agent_stale_thinking_on_wire(agent: Any) -> bool:
 
 
 def compose_user_api_content(
-    content: Any, ext_prefetch_cache: str, plugin_user_context: str
+    content: Any,
+    ext_prefetch_cache: str,
+    plugin_user_context: str,
+    recovered_context: str = "",
 ) -> Optional[str]:
     """Compose the API-bound content of the current turn's user message.
 
@@ -88,7 +91,7 @@ def compose_user_api_content(
     if not isinstance(content, str):
         return None
     fenced = build_memory_context_block(ext_prefetch_cache) if ext_prefetch_cache else ""
-    injections = [part for part in (fenced, plugin_user_context) if part]
+    injections = [part for part in (fenced, plugin_user_context, recovered_context) if part]
     if not injections:
         return None
     return content + "\n\n" + "\n\n".join(injections)
@@ -871,10 +874,23 @@ def _stamp_api_content_sidecar(
     _turn_user_msg = messages[current_turn_user_idx]
     live_content = _turn_user_msg.get("content")
     from agent.session_persistence import _persist_lock, durable_user_row_content
+    # Post-compaction deictic recovery at the prologue stamp so sidecar bytes match the wire
+    # and replay never loses the injection.
+    recovered_context = ""
+    try:
+        from agent.context_acquisition import run_context_acquisition_for_api
+
+        recovered_context = run_context_acquisition_for_api(
+            agent, messages, live_content if isinstance(live_content, str) else ""
+        )
+    except Exception:
+        logger.debug("context acquisition skipped", exc_info=True)
     # Match the row the flush wrote (persist override = clean transcript), not the live bytes.
     durable_content, _api_content = durable_user_row_content(
         agent, _turn_user_msg, live_content,
-        compose_user_api_content(live_content or "", ext_prefetch_cache, plugin_user_context),
+        compose_user_api_content(
+            live_content or "", ext_prefetch_cache, plugin_user_context, recovered_context
+        ),
     )
     if _api_content is None or _api_content == durable_content:
         return
@@ -1175,8 +1191,24 @@ def build_api_messages(
                 api_msg["content"] = _api_content
             else:
                 # Callers that bypass the prologue stamping: compose live.
+                _recovered = ""
+                try:
+                    from agent.context_acquisition import run_context_acquisition_for_api
+
+                    _recovered = run_context_acquisition_for_api(
+                        agent,
+                        messages,
+                        api_msg.get("content", "")
+                        if isinstance(api_msg.get("content"), str)
+                        else "",
+                    )
+                except Exception:
+                    logger.debug("context acquisition skipped on live compose", exc_info=True)
                 _composed = compose_user_api_content(
-                    api_msg.get("content", ""), ext_prefetch_cache, plugin_user_context
+                    api_msg.get("content", ""),
+                    ext_prefetch_cache,
+                    plugin_user_context,
+                    _recovered,
                 )
                 if _composed is not None:
                     api_msg["content"] = _composed
