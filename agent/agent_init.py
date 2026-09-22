@@ -1342,6 +1342,12 @@ def _apply_agent_section(agent, _agent_cfg):
     agent._tool_use_enforcement = _agent_section.get("tool_use_enforcement", "auto")
     agent._execution_guidance = _agent_section.get("execution_guidance", "auto")
 
+    # Post-compaction deictic recovery (evidence sidecar). Failures never block init.
+    with suppress(Exception):
+        from agent.context_acquisition import configure_agent as _configure_context_acquisition
+
+        _configure_context_acquisition(agent, _agent_section.get("context_acquisition"))
+
     # Wall-clock run budget from config — only when the constructor arg was not given.
     if agent.run_budget_seconds is None:
         agent.run_budget_seconds = _normalize_run_budget_seconds(

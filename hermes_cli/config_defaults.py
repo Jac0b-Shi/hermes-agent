@@ -142,6 +142,16 @@ DEFAULT_CONFIG = {
         # "auto" = gpt/codex models; true/false = force for all models; or a list of model-name
         # substrings (e.g. ["gpt", "codex", "gemini", "qwen"]).
         "tool_use_enforcement": "auto",
+        # Post-compaction deictic recovery: when the latest real user message looks like a
+        # reference to missing context ("继续这个", "that last step") shortly after compaction,
+        # inject a bounded evidence sidecar from include_compacted history. Evidence only —
+        # never an instruction queue; new-topic signals disable recovery.
+        "context_acquisition": {
+            "enabled": True,
+            "post_compaction_turns": 2,
+            "max_injected_chars": 8000,
+            "archive_limit": 40,
+        },
         # Execution-discipline prompt block (tool persistence, tools for arithmetic/system facts,
         # read-back after external writes, count reconciliation, literal identifiers,
         # verification-gated completion). Chosen once per session by model name (byte-stable).
