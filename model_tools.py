@@ -827,6 +827,35 @@ def _execute_tool(function_name: str, function_args: Dict[str, Any], original_ar
         dispatch_kwargs["user_task"] = user_task
 
     def _dispatch(next_args: Dict[str, Any]) -> Any:
+        # Core system-integrity policy: the last gate before registry.dispatch, so it
+        # sees the final args after tool_request / pre_tool_call / tool_execution
+        # middleware rewrites. skip_* flags cannot bypass this — every path lands here.
+        try:
+            from hermes_cli.tool_policy.engine import enforce_core_tool_policy
+
+            _core_block = enforce_core_tool_policy(
+                function_name,
+                next_args if isinstance(next_args, dict) else function_args,
+                session_id=ids.session_id or "",
+                turn_id=ids.turn_id or "",
+            )
+        except Exception:
+            logger.exception("core policy engine failed")
+            _core_block = (
+                json.dumps(
+                    {
+                        "status": "command_denied",
+                        "error_type": "core_policy_engine_failed",
+                        "message": "核心安全检查引擎异常，已按 fail-closed 策略拒绝执行",
+                    },
+                    ensure_ascii=False,
+                )
+                if function_name == "terminal"
+                else None
+            )
+        if _core_block is not None:
+            return _core_block
+
         from tools.connectors import dispatch_connector_call, is_connector_name
         if is_connector_name(function_name):
             return dispatch_connector_call(function_name, next_args, ids.tool_call_id)
