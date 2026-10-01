@@ -249,9 +249,10 @@ def launchd_program_arguments(command: list[str], stdout_log: Path, stderr_log: 
     spawns its child as osascript-responsible — an Apple platform binary — so the child is exempt;
     ``/bin/sh -c exec …`` and ``/usr/bin/time`` wrappers are NOT (the launchd job identity is the
     non-entitled first executable). ``do shell script`` buffers the child's stdout/stderr until it exits,
-    so the command appends both to the same files the plist's ``StandardOutPath``/``StandardErrorPath``
-    name (those keys stay: they are where osascript's own output lands — an empty result line per exit
-    and an un-timestamped ``execution error`` line on non-zero exit); ``exec`` keeps the
+    so the command appends both to the gateway log files under ``HERMES_HOME/logs``. The plist's
+    ``StandardOutPath``/``StandardErrorPath`` carry only osascript's own output (an empty result line
+    per exit and an un-timestamped ``execution error`` line on non-zero exit) and must stay on the
+    boot volume — see :func:`_launchd_stdio_paths`; ``exec`` keeps the
     gateway a direct child in the job's process group, so ``launchctl bootout`` / ``kickstart -k`` still
     deliver SIGTERM to it and KeepAlive's ``SuccessfulExit`` semantics are preserved (osascript exits 0
     exactly when the shell did).
@@ -263,6 +264,31 @@ def launchd_program_arguments(command: list[str], stdout_log: Path, stderr_log: 
     )
     applescript = shell.replace("\\", "\\\\").replace('"', '\\"')
     return ["/usr/bin/osascript", "-e", f'do shell script "{applescript}"']
+
+
+def _on_external_volume(path: Path) -> bool:
+    try:
+        parts = Path(path).resolve().parts
+    except (OSError, ValueError):
+        parts = Path(path).parts
+    return len(parts) >= 3 and parts[0] == "/" and parts[1] == "Volumes"
+
+
+def _launchd_stdio_paths(app_stdout: Path, app_stderr: Path) -> tuple[Path, Path]:
+    """Plist ``StandardOutPath``/``StandardErrorPath`` for a LaunchAgent.
+
+    xpcproxy opens these *before* ``posix_spawn``. A path on an external volume is
+    EPERM there (Removable Volume TCC covers the post-spawn osascript shell, not
+    xpcproxy) and is misreported as ``posix_spawn(/usr/bin/osascript) Operation not
+    permitted`` / exit 78 — the job never starts and the app logs gain no lines.
+    Whenever the gateway logs live on ``/Volumes/``, keep launchd's own stdio on the
+    boot volume; the shell redirects still append the real gateway output to
+    *app_stdout* / *app_stderr* after spawn.
+    """
+    if not (_on_external_volume(app_stdout) or _on_external_volume(app_stderr)):
+        return app_stdout, app_stderr
+    stdio_dir = Path.home() / "Library" / "Logs" / "Hermes"
+    return stdio_dir / "gateway.log", stdio_dir / "gateway.error.log"
 
 
 def _timestamped_stderr_gateway_command(error_log: Path, *, external_supervisor: bool = False) -> list[str]:
@@ -377,6 +403,10 @@ def generate_launchd_plist() -> str:
     # ProgramArguments (incl. --profile); the stderr wrapper keeps launchd restart semantics while timestamping
     # stderr; the osascript wrapper gives the job a Local Network identity (see launchd_program_arguments).
     stdout_log, stderr_log = log_dir / "gateway.log", log_dir / "gateway.error.log"
+    # launchd stdio ≠ app stdio when logs live on an external volume (see _launchd_stdio_paths).
+    launchd_stdout, launchd_stderr = _launchd_stdio_paths(stdout_log, stderr_log)
+    if launchd_stdout != stdout_log:
+        launchd_stdout.parent.mkdir(parents=True, exist_ok=True)
     command = _timestamped_stderr_gateway_command(stderr_log, external_supervisor=True)
     prog_args_xml = "\n        ".join(
         f"<string>{escape(part)}</string>" for part in launchd_program_arguments(command, stdout_log, stderr_log)
@@ -460,10 +490,10 @@ def generate_launchd_plist() -> str:
     <integer>60</integer>
 {nofile_block}
     <key>StandardOutPath</key>
-    <string>{stdout_log}</string>
-    
+    <string>{launchd_stdout}</string>
+
     <key>StandardErrorPath</key>
-    <string>{stderr_log}</string>
+    <string>{launchd_stderr}</string>
 </dict>
 </plist>
 """
