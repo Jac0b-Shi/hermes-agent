@@ -6,6 +6,7 @@ volume whenever the gateway's own logs live on an external volume.
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from hermes_cli.gateway_launchd import (
@@ -33,14 +34,15 @@ def test_program_arguments_stay_osascript_on_external_volume(tmp_path: Path):
         tmp_path / "err.log",
     )
     assert args[0] == "/usr/bin/osascript"
-    assert args[1] == "-e"
-    script = args[2]
-    assert "do shell script" in script
+    assert args[1:4] == ["-l", "JavaScript", "-e"]
+    script = args[4]
+    start = script.index("$.system(") + len("$.system(")
+    shell, _ = json.JSONDecoder().raw_decode(script, start)
     # Never a zsh trampoline as the job's first executable (Local Network Privacy, #71206).
     assert "/bin/zsh" not in args[0]
     # Mount-wait is present in the inner shell only.
-    assert "not mounted" in script
-    assert "exec " in script
+    assert "not mounted" in shell
+    assert "exec " in shell
 
 
 def test_program_arguments_no_wait_on_boot_volume(tmp_path: Path):
@@ -50,7 +52,7 @@ def test_program_arguments_no_wait_on_boot_volume(tmp_path: Path):
         tmp_path / "err.log",
     )
     assert args[0] == "/usr/bin/osascript"
-    assert "not mounted" not in args[2]
+    assert "not mounted" not in args[4]
 
 
 def test_launchd_stdio_stays_off_external_volume(tmp_path: Path):

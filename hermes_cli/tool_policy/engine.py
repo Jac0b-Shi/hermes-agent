@@ -22,7 +22,7 @@ from .types import PolicyContext, PolicyDecision, PolicySeverity, ToolPolicyProv
 logger = logging.getLogger(__name__)
 
 # Registered core providers — loaded lazily to avoid circular imports.
-_CORE_PROVIDERS: Optional[List[ToolPolicyProvider]] = None
+_CORE_PROVIDERS: Optional[list[ToolPolicyProvider]] = None
 _CORE_LOAD_ERROR: Optional[str] = None
 
 
@@ -30,7 +30,7 @@ class CorePolicyLoadError(RuntimeError):
     """Raised when a core policy provider fails to load."""
 
 
-def _load_core_providers() -> List[ToolPolicyProvider]:
+def _load_core_providers() -> list[ToolPolicyProvider]:
     """Return the (cached) list of core policy providers.
 
     Raises :exc:`CorePolicyLoadError` if any core provider fails to
@@ -43,7 +43,7 @@ def _load_core_providers() -> List[ToolPolicyProvider]:
     if _CORE_LOAD_ERROR is not None:
         raise CorePolicyLoadError(_CORE_LOAD_ERROR)
 
-    providers: List[ToolPolicyProvider] = []
+    providers: list[ToolPolicyProvider] = []
     try:
         from .providers.macos_system_integrity import MacOSSystemIntegrityProvider
 
@@ -60,7 +60,7 @@ def _load_core_providers() -> List[ToolPolicyProvider]:
 
 def enforce_core_tool_policy(
     tool_name: str,
-    args: Dict[str, Any],
+    args: dict[str, Any],
     *,
     session_id: str = "",
     turn_id: str = "",

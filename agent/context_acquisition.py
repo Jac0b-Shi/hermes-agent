@@ -24,7 +24,7 @@ from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_CONTEXT_ACQUISITION_CONFIG: Dict[str, Any] = {
+DEFAULT_CONTEXT_ACQUISITION_CONFIG: dict[str, Any] = {
     "enabled": True,
     "post_compaction_turns": 2,
     "max_injected_chars": 8000,
@@ -44,7 +44,7 @@ NEW_TOPIC_RE = re.compile(
 )
 
 
-def normalize_config(raw: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+def normalize_config(raw: Optional[dict[str, Any]]) -> dict[str, Any]:
     cfg = dict(DEFAULT_CONTEXT_ACQUISITION_CONFIG)
     if isinstance(raw, dict):
         for key in cfg:
@@ -53,11 +53,11 @@ def normalize_config(raw: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     return cfg
 
 
-def configure_agent(agent: Any, raw_config: Optional[Dict[str, Any]] = None) -> None:
+def configure_agent(agent: Any, raw_config: Optional[dict[str, Any]] = None) -> None:
     agent._context_acquisition_config = normalize_config(raw_config)
 
 
-def _config(agent: Any) -> Dict[str, Any]:
+def _config(agent: Any) -> dict[str, Any]:
     cfg = getattr(agent, "_context_acquisition_config", None)
     return cfg if isinstance(cfg, dict) else dict(DEFAULT_CONTEXT_ACQUISITION_CONFIG)
 
@@ -75,7 +75,7 @@ def is_synthetic_continuation(text: str) -> bool:
             COMPRESSION_CONTINUATION_USER_CONTENT,
             _LEGACY_COMPRESSION_CONTINUATION_USER_CONTENT,
         }
-    except Exception:
+    except ImportError:
         return "This marker exists because" in text and "Continue from the compressed" in text
 
 
@@ -93,7 +93,7 @@ def _content_text(content: Any) -> str:
     return ""
 
 
-def _latest_real_user_text(messages: List[Any]) -> str:
+def _latest_real_user_text(messages: list[Any]) -> str:
     for msg in reversed(messages or []):
         if not isinstance(msg, dict) or msg.get("role") != "user":
             continue
@@ -106,13 +106,13 @@ def _latest_real_user_text(messages: List[Any]) -> str:
 
             if is_compaction_summary_message(msg):
                 continue
-        except Exception:
-            pass
+        except ImportError:
+            logger.debug("compaction summary predicate unavailable", exc_info=True)
         return text
     return ""
 
 
-def _saw_recent_compaction(messages: List[Any], window: int) -> bool:
+def _saw_recent_compaction(messages: list[Any], window: int) -> bool:
     if window <= 0:
         return False
     seen = 0
@@ -124,8 +124,8 @@ def _saw_recent_compaction(messages: List[Any], window: int) -> bool:
 
             if is_compaction_summary_message(msg):
                 return True
-        except Exception:
-            pass
+        except ImportError:
+            logger.debug("compaction summary predicate unavailable", exc_info=True)
         text = _content_text(msg.get("content"))
         if "[CONTEXT COMPACTION" in text or text.startswith("[CONTEXT SUMMARY]:"):
             return True
@@ -139,7 +139,7 @@ def _saw_recent_compaction(messages: List[Any], window: int) -> bool:
 _KEYWORD_RE = re.compile(r"[\w一-鿿]{2,}")
 
 
-def _search_keywords(user_text: str) -> List[str]:
+def _search_keywords(user_text: str) -> list[str]:
     """Content words beyond the deictic/new-topic scaffolding."""
     stripped = DEICTIC_REFERENCE_RE.sub(" ", NEW_TOPIC_RE.sub(" ", user_text or ""))
     return [w for w in _KEYWORD_RE.findall(stripped) if len(w) >= 2][:8]
@@ -147,7 +147,7 @@ def _search_keywords(user_text: str) -> List[str]:
 
 def recover_archive_evidence(
     agent: Any, *, limit: int, user_text: str = ""
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """Pull recent compacted/archived rows — newest-first pages from the current session.
 
     Upstream compaction is in-place (``active=0, compacted=1`` on the same session) and
@@ -158,35 +158,19 @@ def recover_archive_evidence(
     session_id = getattr(agent, "session_id", "") or ""
     if db is None or not session_id:
         return []
-    rows: List[Dict[str, Any]] = []
+    rows: list[dict[str, Any]] = []
+    keywords = [word.casefold() for word in _search_keywords(user_text)]
     try:
         # latest=True pages back from the newest; default latest=False would return
         # the oldest window after compaction — the wrong evidence for "继续这个".
         batch = db.get_messages(
-            session_id, include_compacted=True, latest=True, limit=limit
+            session_id, include_compacted=True, latest=True,
+            limit=max(200, limit * 5) if keywords else limit,
         )
         if isinstance(batch, list):
-            rows.extend(batch)
+            rows.extend(_select_session_evidence(batch, keywords, limit))
     except Exception:
         logger.debug("include_compacted latest read failed", exc_info=True)
-
-    # Keyword hits (beyond bare deictics) from the searchable compacted archive.
-    keywords = _search_keywords(user_text)
-    if keywords:
-        try:
-            hits = db.search_messages(
-                " ".join(keywords),
-                source_filter=[session_id],
-                role_filter=["user", "assistant"],
-                limit=min(8, limit),
-                sort="newest",
-            )
-            seen = {id(r) for r in rows}
-            for hit in hits or []:
-                if isinstance(hit, dict) and id(hit) not in seen:
-                    rows.append(hit)
-        except Exception:
-            logger.debug("archive keyword search failed", exc_info=True)
 
     # Legacy rotation stores: walk compression lineage only when the live session was empty.
     if not rows:
@@ -209,10 +193,30 @@ def recover_archive_evidence(
     return rows[-limit:] if len(rows) > limit else rows
 
 
-def format_recovered_context_block(rows: List[Dict[str, Any]], *, max_chars: int) -> str:
+def _select_session_evidence(rows: list[dict[str, Any]], keywords: list[str], limit: int) -> list[dict[str, Any]]:
+    """Rank a bounded session-only window; source_filter is a platform, not a session ID."""
+    if limit <= 0:
+        return []
+    ranked = []
+    for index, row in enumerate(rows):
+        if row.get("role") not in {"user", "assistant"}:
+            continue
+        text = _content_text(row.get("content")).casefold()
+        score = sum(word in text for word in keywords)
+        if score:
+            ranked.append((score, index))
+    selected = {index for _, index in sorted(ranked, reverse=True)[:min(8, max(1, limit // 2))]}
+    for index in range(len(rows) - 1, -1, -1):
+        if len(selected) >= limit:
+            break
+        selected.add(index)
+    return [rows[index] for index in sorted(selected)]
+
+
+def format_recovered_context_block(rows: list[dict[str, Any]], *, max_chars: int) -> str:
     if not rows:
         return ""
-    chunks: List[str] = []
+    chunks: list[str] = []
     for row in rows:
         if not isinstance(row, dict):
             continue
@@ -229,7 +233,7 @@ def format_recovered_context_block(rows: List[Dict[str, Any]], *, max_chars: int
         chunks.append(f"[{role}] {text}")
     if not chunks:
         return ""
-    body = "\n\n".join(reversed(chunks))
+    body = "\n\n".join(chunks)
     if len(body) > max_chars:
         body = body[-max_chars:]
     return (
@@ -243,7 +247,7 @@ def format_recovered_context_block(rows: List[Dict[str, Any]], *, max_chars: int
     )
 
 
-def should_recover(user_text: str, messages: List[Any], cfg: Dict[str, Any]) -> bool:
+def should_recover(user_text: str, messages: list[Any], cfg: dict[str, Any]) -> bool:
     if not cfg.get("enabled", True):
         return False
     if not user_text or is_synthetic_continuation(user_text):
@@ -255,7 +259,7 @@ def should_recover(user_text: str, messages: List[Any], cfg: Dict[str, Any]) -> 
     return _saw_recent_compaction(messages, int(cfg.get("post_compaction_turns", 2)))
 
 
-def run_context_acquisition_for_api(agent: Any, messages: List[Any], user_text: str) -> str:
+def run_context_acquisition_for_api(agent: Any, messages: list[Any], user_text: str) -> str:
     """Return the recovered-evidence injection, or ``''`` when recovery does not apply."""
     try:
         cfg = _config(agent)

@@ -37,7 +37,7 @@ _DENY_TCC_SERVICES: frozenset[str] = frozenset({
     "developertool", "remotedesktop",
 })
 
-_TCC_DB_MARKERS: Tuple[str, ...] = (
+_TCC_DB_MARKERS: tuple[str, ...] = (
     "com.apple.tcc/tcc.db",
     "application support/com.apple.tcc/tcc.db",
 )
@@ -74,7 +74,7 @@ def _is_local_macos_terminal() -> bool:
 from ..shell_words import strip_command_prefixes as _strip_cmd_prefixes
 
 
-def _find_shell_c_arg(argv: List[str]) -> Optional[str]:
+def _find_shell_c_arg(argv: list[str]) -> Optional[str]:
     i = 0
     while i < len(argv):
         if argv[i] in ("-c", "-lc"):
@@ -102,7 +102,7 @@ def _check_command(raw_cmd: str) -> Optional[PolicyDecision]:
     return _check_argv(raw_cmd, argv)
 
 
-def _check_argv(raw_cmd: str, argv: List[str]) -> Optional[PolicyDecision]:
+def _check_argv(raw_cmd: str, argv: list[str]) -> Optional[PolicyDecision]:
     exe_parts = _strip_cmd_prefixes(argv)
     if not exe_parts:
         return None
@@ -125,6 +125,7 @@ def _check_argv(raw_cmd: str, argv: List[str]) -> Optional[PolicyDecision]:
             try:
                 return _check_command(inner)
             except Exception:
+                logger.exception("Core policy could not parse nested shell command")
                 return PolicyDecision(
                     action="block",
                     error_type="command_parse_error",

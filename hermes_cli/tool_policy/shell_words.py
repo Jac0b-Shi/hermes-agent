@@ -32,10 +32,10 @@ _ENV_SPLIT_STRING_OPTIONS: frozenset[str] = frozenset({"-S", "--split-string"})
 
 # Sentinel returned when env -S parsing fails — treated as a block signal
 # by callers.
-_PARSE_ERROR: List[str] = ["__unsafe_env_split_string__"]
+_PARSE_ERROR: list[str] = ["__unsafe_env_split_string__"]
 
 
-def drop_option_arg(argv: List[str], index: int, opts_with_arg: frozenset[str]) -> int:
+def drop_option_arg(argv: list[str], index: int, opts_with_arg: frozenset[str]) -> int:
     """Return the index after skipping an option's argument, if any."""
     option = argv[index]
     index += 1
@@ -50,7 +50,7 @@ def _option_name(option: str) -> str:
     return option.split("=", 1)[0]
 
 
-def strip_command_prefixes(argv: List[str]) -> List[str]:
+def strip_command_prefixes(argv: list[str]) -> list[str]:
     """Remove sudo/env/command/arch/nice/nohup and their options from *argv*.
 
     Returns a new list with the real command at position 0.

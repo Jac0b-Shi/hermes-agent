@@ -4,6 +4,8 @@ from __future__ import annotations
 import os
 from unittest.mock import patch
 
+import pytest
+
 from hermes_cli.tool_policy.providers.macos_system_integrity import (
     MacOSSystemIntegrityProvider,
     _check_command,
@@ -159,31 +161,35 @@ def test_provider_non_terminal_returns_none():
     assert _provider.check_tool_call("write_file", {"path": "/tmp/test", "content": "x"}, _ctx("write_file")) is None
 
 
+@pytest.mark.platforms("not macos")
 def test_provider_non_darwin_returns_none():
-    with patch("sys.platform", "win32"):
-        assert _provider.check_tool_call("terminal", {"command": "tccutil reset All"}, _ctx()) is None
+    assert _provider.check_tool_call("terminal", {"command": "tccutil reset All"}, _ctx()) is None
 
 
+@pytest.mark.platforms("macos")
 def test_provider_local_darwin_blocks():
-    with patch("sys.platform", "darwin"), patch.dict(os.environ, {"TERMINAL_ENV": "local"}):
+    with patch.dict(os.environ, {"TERMINAL_ENV": "local"}):
         decision = _provider.check_tool_call("terminal", {"command": "tccutil reset All"}, _ctx())
         assert decision is not None
         assert decision.error_type == "dangerous_tcc_reset"
 
 
+@pytest.mark.platforms("macos")
 def test_provider_docker_backend_bypasses():
-    with patch("sys.platform", "darwin"), patch.dict(os.environ, {"TERMINAL_ENV": "docker"}, clear=True):
+    with patch.dict(os.environ, {"TERMINAL_ENV": "docker"}, clear=True):
         assert _provider.check_tool_call("terminal", {"command": "tccutil reset All"}, _ctx()) is None
 
 
+@pytest.mark.platforms("macos")
 def test_provider_ssh_backend_bypasses():
-    with patch("sys.platform", "darwin"), patch.dict(os.environ, {"TERMINAL_ENV": "ssh"}, clear=True):
+    with patch.dict(os.environ, {"TERMINAL_ENV": "ssh"}, clear=True):
         assert _provider.check_tool_call("terminal", {"command": "osascript test"}, _ctx()) is None
 
 
+@pytest.mark.platforms("macos")
 def test_provider_backend_env_var_bypasses():
     """HERMES_TERMINAL_BACKEND=docker bypasses even with local TERMINAL_ENV."""
-    with patch("sys.platform", "darwin"), patch.dict(
+    with patch.dict(
         os.environ,
         {"TERMINAL_ENV": "local", "HERMES_TERMINAL_BACKEND": "docker"},
         clear=True,

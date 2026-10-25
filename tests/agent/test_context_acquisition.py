@@ -152,12 +152,8 @@ def test_recover_uses_latest_not_oldest_window():
 
 
 def test_keyword_search_supplements_deictic_recovery():
-    class SearchDB(FakeDB):
-        def search_messages(self, query, **kwargs):
-            return [{"role": "user", "content": f"hit:{query}"}]
-
-    db = SearchDB(rows=[{"role": "user", "content": "nearby"}])
+    db = FakeDB(rows=[{"role": "user", "content": "launchd mount wait decision"}]
+                + [{"role": "assistant", "content": "nearby"} for _ in range(20)])
     agent = _agent(_session_db=db)
     rows = ca.recover_archive_evidence(agent, limit=10, user_text="继续这个 launchd wrapper 的 mount wait")
-    assert any("hit:" in r.get("content", "") for r in rows)
-
+    assert any("mount wait decision" in r.get("content", "") for r in rows)
