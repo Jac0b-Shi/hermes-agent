@@ -1263,6 +1263,28 @@ Plugin engines are **never auto-activated** — you must explicitly set `context
 
 See [Memory Providers](./features/memory-providers.md) for the analogous single-select system for memory plugins.
 
+## Post-Compaction Reference Recovery
+
+This fork can attach recent transcript evidence when a real user message refers back to a
+recently compacted conversation. Explicit new-topic messages and synthetic continuation
+markers do not trigger recovery. Recovered evidence helps resolve references; it is not an
+instruction queue and does not authorize resuming old tasks.
+
+```yaml
+agent:
+  context_acquisition:
+    enabled: true
+    post_compaction_turns: 2
+    archive_limit: 40
+    max_injected_chars: 8000
+```
+
+`agent.context_acquisition.enabled` controls recovery. `post_compaction_turns` sets the recent
+turn window. `archive_limit` limits selected transcript entries; `max_injected_chars` caps
+the evidence body attached to the current message. History is read through the session owner's
+authorized API, including in managed workers. Selection is bounded after history is loaded;
+these settings do not bound the owner's underlying history read.
+
 ## Iteration Budget
 
 When the agent is working on a complex task with many tool calls, it can burn through its iteration budget (default: 500 turns). Hermes does **not** inject mid-task pressure warnings — earlier builds warned the model at 70%/90% budget, which caused models to abandon complex tasks prematurely and was removed in April 2026.

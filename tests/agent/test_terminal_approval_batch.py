@@ -30,6 +30,8 @@ def _agent():
             for schema in (TERMINAL_SCHEMA, READ_FILE_SCHEMA)
         ]),
         patch("model_tools.check_toolset_requirements", return_value={}),
+        # Approval batching is independent of the fork's optional delete guard.
+        patch("hermes_cli.plugins._get_disabled_plugins", return_value={"macos-trash-guard"}),
         patch("agent.process_bootstrap.OpenAI"),
         patch("agent.model_metadata.fetch_model_metadata", return_value={}),
     ):
