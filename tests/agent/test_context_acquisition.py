@@ -30,7 +30,7 @@ class FakeDB:
     def get_compression_lineage(self, session_id):
         return self.lineage or [session_id]
 
-    def get_messages(self, session_id, include_compacted=False, limit=None, latest=False, **kwargs):
+    def get_messages_as_conversation(self, session_id, include_compacted=False, limit=None, latest=False, **kwargs):
         rows = list(self.rows)
         if latest:
             rows = list(reversed(rows))
@@ -131,7 +131,7 @@ def test_run_context_acquisition_empty_for_new_topic():
 def test_run_context_acquisition_tolerates_db_errors():
     db = MagicMock()
     db.get_compression_lineage.side_effect = RuntimeError("boom")
-    db.get_messages.side_effect = RuntimeError("boom")
+    db.get_messages_as_conversation.side_effect = RuntimeError("boom")
     agent = _agent(_session_db=db)
     messages = [
         {"role": "assistant", "content": "[CONTEXT COMPACTION — REFERENCE ONLY] summary"},

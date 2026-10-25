@@ -1,7 +1,7 @@
 """Post-compaction deictic recovery — evidence sidecar, not an instruction queue.
 
 Upstream already keeps compacted history queryable via
-``SessionDB.get_messages(include_compacted=True)`` and tracks rotation via
+``get_messages_as_conversation(include_compacted=True)`` and tracks rotation via
 compression lineage. This module decides *when* a turn should pull a bounded
 evidence block from that history and *how* to frame it so the model treats it
 as recovered evidence, never as a task queue.
@@ -148,26 +148,24 @@ def _search_keywords(user_text: str) -> list[str]:
 def recover_archive_evidence(
     agent: Any, *, limit: int, user_text: str = ""
 ) -> list[dict[str, Any]]:
-    """Pull recent compacted/archived rows — newest-first pages from the current session.
+    """Select recent evidence from the owner-authorized current-session history.
 
     Upstream compaction is in-place (``active=0, compacted=1`` on the same session) and
-    ``search_messages`` already indexes those rows. Compression lineage is only a legacy
-    fallback for pre-rotation stores.
+    history projection includes those rows. Compression lineage is only a legacy
+    fallback when the current segment has no evidence.
     """
     db = getattr(agent, "_session_db", None)
     session_id = getattr(agent, "session_id", "") or ""
-    if db is None or not session_id:
+    if db is None or not session_id or limit <= 0:
         return []
     rows: list[dict[str, Any]] = []
     keywords = [word.casefold() for word in _search_keywords(user_text)]
     try:
-        # latest=True pages back from the newest; default latest=False would return
-        # the oldest window after compaction — the wrong evidence for "继续这个".
-        batch = db.get_messages(
-            session_id, include_compacted=True, latest=True,
-            limit=max(200, limit * 5) if keywords else limit,
-        )
+        # Use the owner-authorized history API: managed workers cannot open SQLite
+        # or use SessionDB's raw-row API. Selection is bounded after history replay.
+        batch = db.get_messages_as_conversation(session_id, include_compacted=True)
         if isinstance(batch, list):
+            batch = batch[-(max(200, limit * 5) if keywords else limit):]
             rows.extend(_select_session_evidence(batch, keywords, limit))
     except Exception:
         logger.debug("include_compacted latest read failed", exc_info=True)
@@ -179,12 +177,9 @@ def recover_archive_evidence(
             for sid in lineage:
                 if not sid or sid == session_id:
                     continue
-                try:
-                    batch = db.get_messages(sid, include_compacted=True, latest=True, limit=limit)
-                except TypeError:
-                    batch = db.get_messages(sid, include_compacted=True)
+                batch = db.get_messages_as_conversation(sid, include_compacted=True)
                 if isinstance(batch, list):
-                    rows.extend(batch)
+                    rows.extend(batch[-limit:])
                 if len(rows) >= limit:
                     break
         except Exception:
