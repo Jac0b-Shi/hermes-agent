@@ -50,6 +50,8 @@ def turn(monkeypatch, tmp_path):
     """Bind one gateway turn: the gateway's process-wide ask marker, manual mode, the session's
     vars and (for a local session) its frozen policy. Yields a starter and the captured prompts."""
     monkeypatch.setattr(approval_context, "_get_approval_mode", lambda: "manual")
+    # Exercise approval routing independently of the optional macOS delete guard.
+    monkeypatch.setattr("hermes_cli.plugins._get_disabled_plugins", lambda: {"macos-trash-guard"})
     monkeypatch.setattr(A, "_YOLO_MODE_FROZEN", False)
     prompts: list[dict] = []
     answers: dict[str, str] = {}
