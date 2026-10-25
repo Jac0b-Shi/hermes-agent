@@ -182,6 +182,7 @@ def main():
         f'model:\n  default: local-control\n  provider: custom\n  base_url: {url}\n'
         'approvals:\n  mode: manual\n  timeout: 45\n'
         'streaming:\n  enabled: false\n'
+        'plugins:\n  disabled: [macos-trash-guard]\n'
         'auxiliary:\n  title_generation:\n    enabled: false\n')
     try:
         asyncio.run(probe(peer, target, kind))
