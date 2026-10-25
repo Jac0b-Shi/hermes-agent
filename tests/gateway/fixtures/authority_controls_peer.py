@@ -185,6 +185,7 @@ def main():
     Path(os.environ['HERMES_HOME'], 'config.yaml').write_text(
         f'model:\n  default: local-control\n  provider: custom\n  base_url: {url}\n'
         'approvals:\n  mode: manual\n  timeout: 30\n'
+        'plugins:\n  disabled: [macos-trash-guard]\n'
         'streaming:\n  enabled: false\n'
         'auxiliary:\n  title_generation:\n    enabled: false\n')
     try:

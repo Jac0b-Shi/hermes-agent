@@ -165,6 +165,7 @@ def probe(tmp_path):
         'platform_toolsets': {'gui': ['terminal'], 'bot_room': ['terminal']},
         'approvals': {'mode': 'manual', 'timeout': 60},
         'auxiliary': {'title_generation': {'enabled': False}}, 'terminal': {'cwd': str(home)}}
+    cfg['plugins'] = {'disabled': ['macos-trash-guard']}
     (home / 'config.yaml').write_text(json.dumps(cfg))
     # The named profile's gateway runs beside the host: `gateway.standalone: true` is the opt-out
     # (`multiplex_profiles: false` is retired and rewritten to true at boot).
