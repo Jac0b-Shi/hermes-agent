@@ -7,6 +7,7 @@ volume whenever the gateway's own logs live on an external volume.
 from __future__ import annotations
 
 import json
+import plistlib
 from pathlib import Path
 
 from hermes_cli.gateway_launchd import (
@@ -72,3 +73,15 @@ def test_launchd_stdio_keeps_app_paths_on_boot_volume(tmp_path: Path):
     # Same paths: shell redirects and launchd stdio may share the boot-volume files.
     assert launchd_out == app_out
     assert launchd_err == app_err
+
+
+def test_plist_cwd_is_boot_safe_even_when_external_volume_is_currently_mounted(tmp_path, monkeypatch):
+    from hermes_cli import gateway
+
+    external = Path("/Volumes/Example/profile")
+    original_is_dir = Path.is_dir
+    monkeypatch.setattr(Path, "is_dir", lambda path: path == external or original_is_dir(path))
+    monkeypatch.setattr(gateway, "_stable_service_working_dir", lambda: str(external))
+    monkeypatch.setattr(gateway, "get_hermes_home", lambda: tmp_path)
+    plist = plistlib.loads(gateway.generate_launchd_plist().encode())
+    assert not plist["WorkingDirectory"].startswith("/Volumes/")

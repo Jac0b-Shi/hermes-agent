@@ -414,7 +414,7 @@ def generate_launchd_plist() -> str:
     working_dir = _gw()._stable_service_working_dir()
     # launchd CHDIR's before osascript runs; an unmounted external volume would fail
     # the job before the mount-wait in launchd_program_arguments can help.
-    if str(working_dir).startswith("/Volumes/") and not Path(working_dir).is_dir():
+    if _on_external_volume(Path(working_dir)):
         working_dir = str(Path.home())
     hermes_home = str(_gw().get_hermes_home().resolve())
     log_dir = _gw().get_hermes_home() / "logs"
