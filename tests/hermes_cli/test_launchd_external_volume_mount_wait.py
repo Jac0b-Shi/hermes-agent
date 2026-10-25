@@ -10,6 +10,8 @@ import json
 import plistlib
 from pathlib import Path
 
+import pytest
+
 from hermes_cli.gateway_launchd import (
     _external_volume_wait_prefix,
     _launchd_stdio_paths,
@@ -85,3 +87,14 @@ def test_plist_cwd_is_boot_safe_even_when_external_volume_is_currently_mounted(t
     monkeypatch.setattr(gateway, "get_hermes_home", lambda: tmp_path)
     plist = plistlib.loads(gateway.generate_launchd_plist().encode())
     assert not plist["WorkingDirectory"].startswith("/Volumes/")
+
+
+def test_service_identity_accepts_generated_mount_wait_but_refuses_extra_shell(tmp_path):
+    from hermes_cli.gateway_runtime_service_identity import _launchd_command
+
+    command = ["/Volumes/Example/bin/python", "-m", "hermes_cli.main", "gateway", "run"]
+    argv = launchd_program_arguments(command, tmp_path / "out.log", tmp_path / "err.log")
+    assert _launchd_command(argv) == (command, True)
+    tampered = [*argv[:-1], argv[-1].replace("while [", "id; while [", 1)]
+    with pytest.raises(ValueError, match="service_identity_unverified"):
+        _launchd_command(tampered)

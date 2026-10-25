@@ -232,9 +232,11 @@ def _launchd_command(argv: list[str]) -> tuple[list[str], bool]:
         tokens = shlex.split(shell) if isinstance(shell, str) else []
     except ValueError:
         tokens = []
-    if len(tokens) < 6 or tokens[0] != "exec" or tokens[-4] != ">>" or tokens[-2] != "2>>":
+    if len(tokens) < 6 or "exec" not in tokens or tokens[-4] != ">>" or tokens[-2] != "2>>":
         _unverified()
-    command = tokens[1:-4]
+    # A removable-volume launcher may precede exec with the generated mount wait.
+    # Reconstruction below still rejects every non-generated prefix/operator.
+    command = tokens[tokens.index("exec") + 1:-4]
     if launchd_program_arguments(command, Path(tokens[-3]), Path(tokens[-1])) != argv:
         _unverified()
     return command, True
