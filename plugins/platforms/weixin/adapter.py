@@ -191,6 +191,7 @@ class ContextTokenStore:
     def __init__(self, hermes_home: str):
         self._root = _account_dir(hermes_home)
         self._cache: dict[str, str] = {}
+        self._generations: dict[str, int] = {}
         # Serializes the offloaded flushes so two concurrent set() calls
         # cannot land their writes out of order (last-writer-wins would drop
         # the newer token from disk).
@@ -211,14 +212,31 @@ class ContextTokenStore:
             return
         restored = {self._key(account_id, u): t for u, t in data.items() if isinstance(t, str) and t}
         self._cache.update(restored)
+        for key in restored:
+            self._generations[key] = self._generations.get(key, 0) + 1
         if restored:
             logger.info("weixin: restored %d context token(s) for %s", len(restored), _safe_id(account_id))
 
     def get(self, account_id: str, user_id: str) -> Optional[str]:
         return self._cache.get(self._key(account_id, user_id))
 
+    def snapshot(self, account_id: str, user_id: str) -> tuple[Optional[str], int]:
+        return self.get(account_id, user_id), self._generations.get(self._key(account_id, user_id), 0)
+
     async def set(self, account_id: str, user_id: str, token: str) -> None:
-        self._cache[self._key(account_id, user_id)] = token
+        key = self._key(account_id, user_id)
+        self._cache[key] = token
+        self._generations[key] = self._generations.get(key, 0) + 1
+        await self._flush(account_id)
+
+    async def discard_if_current(self, account_id: str, user_id: str, expected_token: str, expected_generation: int) -> None:
+        key = self._key(account_id, user_id)
+        # No await between compare and removal: an old request cannot delete a newer inbound.
+        if self._cache.get(key) == expected_token and self._generations.get(key, 0) == expected_generation:
+            del self._cache[key]
+            await self._flush(account_id)
+
+    async def _flush(self, account_id: str) -> None:
         # atomic_json_write() fsyncs, so the flush is offloaded off the loop; the payload is snapshotted
         # here (the worker never iterates ``_cache`` mid-mutation) and the lock keeps flushes in order.
         async with self._persist_lock:
@@ -974,29 +992,40 @@ class WeixinAdapter(OwnAccessPolicyMixin, BasePlatformAdapter):
             self._rate_limit_circuit_until = max(self._rate_limit_circuit_until, time.monotonic() + self._rate_limit_circuit_open_seconds)
         return self._rate_limit_cooldown_remaining() > 0
 
-    async def _send_text_chunk(self, *, chat_id: str, chunk: str, context_token: Optional[str], client_id: str) -> None:
-        """Send one text chunk with retry/backoff under the adapter-wide text gate. A stale-session response (``-14``,
-        or ``-2`` with ``prepare failed``/``unknown error``) is re-sent once *without* ``context_token`` — iLink accepts
-        tokenless sends as a degraded fallback, which keeps cron pushes working when no user message refreshed the
-        session. A ``-2`` that survives that fails fast via ``_session_not_ready_error``."""
+    async def _recover_session_context(self, chat_id: str, failed_token: Optional[str], generation: int, recoveries: int) -> bool:
+        if recoveries >= 2:
+            return False
+        if failed_token:
+            await self._token_store.discard_if_current(self._account_id, chat_id, failed_token, generation)
+        elif not self._token_store.get(self._account_id, chat_id):
+            return False
+        newer = self._token_store.get(self._account_id, chat_id)
+        logger.warning("[%s] session expired for %s; retrying %s", self.name, _safe_id(chat_id),
+                       "with newer inbound context" if newer else "without context_token")
+        return True
+
+    async def _send_text_chunk(self, *, chat_id: str, chunk: str, client_id: str) -> None:
+        """Read the latest token inside the text gate and before each attempt. Stale-session recovery
+        preserves newer inbound tokens; the legacy tokenless fallback is server-dependent, never a
+        guaranteed renewal. Persistent session failures stop without opening the rate-limit circuit."""
         async with self._send_text_gate:
             last_error: Optional[Exception] = None
-            retried_without_token = False
-            attempt = 0  # counts real failures only — the tokenless re-send must not eat the retry budget
+            session_recoveries = 0
+            attempt = 0  # Session recovery does not consume the transport retry budget.
             while True:
                 if self._rate_limit_cooldown_remaining() > 0:
                     raise RuntimeError(f"iLink sendmessage rate limited; cooldown active for {self._rate_limit_cooldown_remaining():.1f}s")
                 try:
+                    context_token, generation = self._token_store.snapshot(self._account_id, chat_id)
                     resp = await _send_message(
                         self._send_session, base_url=self._base_url, token=self._token, to=chat_id, text=chunk,
                         context_token=context_token, client_id=client_id)
                     ret, errcode = (resp.get("ret"), resp.get("errcode")) if resp and isinstance(resp, dict) else (None, None)
                     if (ret is not None and ret != 0) or (errcode is not None and errcode != 0):
                         errmsg = resp.get("errmsg") or resp.get("msg")
-                        if _is_session_expired(resp, ret, errcode) and not retried_without_token and context_token:
-                            retried_without_token, context_token = True, None
-                            self._token_store._cache.pop(self._token_store._key(self._account_id, chat_id), None)
-                            logger.warning("[%s] session expired for %s; retrying without context_token", self.name, _safe_id(chat_id))
+                        if _is_session_expired(resp, ret, errcode) and await self._recover_session_context(
+                                chat_id, context_token, generation, session_recoveries):
+                            session_recoveries += 1
                             continue
                         if _is_stale_session_ret(ret, errcode, errmsg):
                             # break, not raise: a raise here is caught below and re-enters the retry ladder.
@@ -1037,7 +1066,6 @@ class WeixinAdapter(OwnAccessPolicyMixin, BasePlatformAdapter):
     async def send(self, chat_id: str, content: str, reply_to: Optional[str] = None, metadata: Optional[dict[str, Any]] = None) -> SendResult:
         if not self._send_session or not self._token:
             return SendResult(success=False, error="Not connected")
-        context_token = self._token_store.get(self._account_id, chat_id)
         last_message_id: Optional[str] = None
         # Extract MEDIA: tags and bare local file paths before text delivery, under the routed
         # profile's scope: Docker MEDIA translation infers the sandbox from the active profile (#109024).
@@ -1057,7 +1085,7 @@ class WeixinAdapter(OwnAccessPolicyMixin, BasePlatformAdapter):
             chunks = [c for c in self._split_text(self.format_message(final_content)) if c and c.strip()]
             for idx, chunk in enumerate(chunks):
                 client_id = f"hermes-weixin-{uuid.uuid4().hex}"
-                await self._send_text_chunk(chat_id=chat_id, chunk=chunk, context_token=context_token, client_id=client_id)
+                await self._send_text_chunk(chat_id=chat_id, chunk=chunk, client_id=client_id)
                 last_message_id = client_id
                 if idx < len(chunks) - 1 and self._send_chunk_delay_seconds > 0:
                     await asyncio.sleep(self._send_chunk_delay_seconds)
@@ -1156,7 +1184,6 @@ class WeixinAdapter(OwnAccessPolicyMixin, BasePlatformAdapter):
         if not upload_url:
             raise RuntimeError(f"getUploadUrl returned neither upload_param nor upload_full_url: {upload_response}")
         encrypted_query_param = await _upload_ciphertext(self._send_session, ciphertext=ciphertext, upload_url=upload_url)
-        context_token = self._token_store.get(self._account_id, chat_id)
         # iLink expects aes_key as base64(hex_string), not base64(raw_bytes) — otherwise images render as grey boxes.
         item_kwargs = {
             "encrypt_query_param": encrypted_query_param, "aes_key_for_api": base64.b64encode(aes_key.hex().encode("ascii")).decode("ascii"),
@@ -1169,19 +1196,18 @@ class WeixinAdapter(OwnAccessPolicyMixin, BasePlatformAdapter):
         last_message_id = ""
         for item_list in item_lists:
             last_message_id = f"hermes-weixin-{uuid.uuid4().hex}"
+            session_recoveries = 0
             while True:
+                context_token, generation = self._token_store.snapshot(self._account_id, chat_id)
                 resp = await _send_items(
                     self._send_session, base_url=self._base_url, token=self._token, to=chat_id, item_list=item_list,
                     context_token=context_token, client_id=last_message_id)
                 ret, errcode = (resp.get("ret"), resp.get("errcode")) if resp and isinstance(resp, dict) else (None, None)
                 if (ret is None or ret == 0) and (errcode is None or errcode == 0):
                     break
-                # Same stale-session fallback as _send_text_chunk: re-send once without context_token. Clearing the
-                # token also covers the remaining item lists (caption, then media) and bounds this loop.
-                if _is_session_expired(resp, ret, errcode) and context_token:
-                    context_token = None
-                    self._token_store._cache.pop(self._token_store._key(self._account_id, chat_id), None)
-                    logger.warning("[%s] session expired for %s; re-sending media without context_token", self.name, _safe_id(chat_id))
+                if _is_session_expired(resp, ret, errcode) and await self._recover_session_context(
+                        chat_id, context_token, generation, session_recoveries):
+                    session_recoveries += 1
                     continue
                 errmsg = resp.get("errmsg") or resp.get("msg")
                 if _is_stale_session_ret(ret, errcode, errmsg):
