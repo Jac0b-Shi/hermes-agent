@@ -63,7 +63,8 @@ def test_api_and_ws_pending_controls_share_identity(tmp_path):
     cfg = {'model': {'provider': 'custom', 'default': 'local-wire-stub', 'base_url': base},
            'gateway': {'platforms': {'api_server': {'enabled': True, 'port': port, 'host': '127.0.0.1'}}, 'multiplex_profiles': False},
            'auxiliary': {'title_generation': {'enabled': False}}, 'terminal': {'cwd': str(home)},
-           'platform_toolsets': {'api_server': ['terminal', 'clarify']}, 'approvals': {'mode': 'manual'}}
+           'platform_toolsets': {'api_server': ['terminal', 'clarify']}, 'approvals': {'mode': 'manual'},
+           'plugins': {'disabled': ['macos-trash-guard']}}
     (home / 'config.yaml').write_text(json.dumps(cfg))
     from tests.gateway.fixtures.local_recovery_probe import child_env
     env = {**child_env(), **{k: os.environ[k] for k in ('TIRITH_ENABLED',) if k in os.environ}}

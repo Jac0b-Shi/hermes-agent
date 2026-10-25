@@ -332,8 +332,8 @@ class LocalSessionPolicy:
     @property
     def run_budget_seconds(self):
         """Frozen `agent.run_budget_seconds` (`--run-budget` folds into it); None = no budget."""
-        from agent.agent_init import _normalize_run_budget_seconds
-        return _normalize_run_budget_seconds(self.config().get('agent', {}).get('run_budget_seconds'))
+        from agent.agent_init_budget import normalize_run_budget_seconds
+        return normalize_run_budget_seconds(self.config().get('agent', {}).get('run_budget_seconds'))
 
     @property
     def reasoning_config(self):
