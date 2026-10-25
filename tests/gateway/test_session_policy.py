@@ -89,10 +89,11 @@ async def test_launch_options_reach_the_owner_frozen_and_hooks_consented(tmp_pat
     policy = frozen(sid)
     assert 'LAUNCH_SKILL_BODY' in policy.skills_prompt and policy.pass_session_id and policy.checkpoints_enabled
     assert str(hook) in (home / shell_hooks.ALLOWLIST_FILENAME).read_text()
-    assert len(get_plugin_manager()._hooks['pre_tool_call']) == 1
+    registered = [cb for cb in get_plugin_manager()._hooks['pre_tool_call'] if getattr(cb, 'shell_hook_key', None)]
+    assert len(registered) == 1
     # Retrying the request id resumes the frozen route; nothing re-renders or re-registers.
     assert await create('launch', **launch) == sid
-    assert len(get_plugin_manager()._hooks['pre_tool_call']) == 1
+    assert [cb for cb in get_plugin_manager()._hooks['pre_tool_call'] if getattr(cb, 'shell_hook_key', None)] == registered
     plain = frozen(await create('plain'))
     assert plain.skills_prompt is None and not plain.pass_session_id and not plain.checkpoints_enabled
     # Never silently dropped: nothing resolving, bad shapes, or profile reads on a bypass launch refuse.

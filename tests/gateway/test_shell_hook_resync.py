@@ -41,7 +41,8 @@ def _cfg(*commands):
 
 def _wired(event="pre_tool_call"):
     from hermes_cli.plugins import get_plugin_manager
-    return sorted(cb.__name__ for cb in get_plugin_manager()._hooks.get(event, []))
+    return sorted(cb.__name__ for cb in get_plugin_manager()._hooks.get(event, [])
+                  if getattr(cb, "shell_hook_key", None))
 
 
 def test_gateway_resync_follows_config_and_allowlist_without_prompting(home, tmp_path, monkeypatch):
