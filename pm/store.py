@@ -312,7 +312,9 @@ def tree_digest(root: Path) -> str:
     ``__pycache__`` directories are skipped: CPython writes .pyc caches
     into them the first time the staged interpreter runs (uv venv/uv sync
     in a bundle build; first boot of a shipped app), so they are runtime
-    state, not package bytes — the digest is over what pm published."""
+    state, not package bytes — the digest is over what pm published.
+    Regular .DS_Store files are likewise Finder state; symlinks with that
+    name still contribute their target text."""
     import hashlib
 
     files: list[tuple[str, Path]] = []
@@ -327,6 +329,8 @@ def tree_digest(root: Path) -> str:
         dirnames[:] = descend
         for fname in filenames:
             path = Path(dirpath) / fname
+            if fname == ".DS_Store" and not path.is_symlink():
+                continue
             files.append((path.relative_to(root).as_posix(), path))
     files.sort(key=lambda item: item[0])
 

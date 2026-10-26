@@ -399,6 +399,26 @@ def test_tree_digest_is_content_bound(pm_env):
         pytest.skip("symlinks unavailable on this host")
 
 
+def test_tree_digest_ignores_finder_metadata_without_hiding_payload_changes(tmp_path):
+    tree = tmp_path / "entry"
+    (tree / "lib").mkdir(parents=True)
+    library = tree / "lib" / "runtime.js"
+    library.write_bytes(b"original library")
+    before = tree_digest(tree)
+
+    for directory in (tree, tree / "lib"):
+        metadata = directory / ".DS_Store"
+        metadata.write_bytes(b"finder layout")
+        assert tree_digest(tree) == before
+        metadata.write_bytes(b"updated finder layout")
+        assert tree_digest(tree) == before
+
+    library.write_bytes(b"tampered library")
+    assert tree_digest(tree) != before
+    library.write_bytes(b"original library")
+    assert tree_digest(tree) == before
+
+
 def test_doctor_flags_tampered_entry_bytes(pm_env, capsys):
     """Post-install tampering: doctor re-hashes the realized tree against
     the recorded digest and flags it; restoring the bytes clears it."""
