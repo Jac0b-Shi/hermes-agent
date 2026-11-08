@@ -200,6 +200,8 @@
     "plugins/kanban/dashboard/plugin_api.py hermes_cli.projects_db": 3,
     "plugins/kanban/dashboard/plugin_api.py hermes_cli.web_read_coalescing.coalesced_read": 1,
     "plugins/kanban/dashboard/plugin_api.py hermes_cli.web_server_chat": 1,
+    "plugins/macos_trash_guard/__init__.py tools.terminal_scope.TerminalPolicyUnavailable": 1,
+    "plugins/macos_trash_guard/__init__.py tools.terminal_scope.terminal_env": 1,
     "plugins/memory/byterover/__init__.py tools.environments.local.build_subprocess_env": 1,
     "plugins/memory/byterover/__init__.py tools.environments.local.strip_launch_profile_env": 1,
     "plugins/memory/retaindb/__init__.py agent.file_safety.raise_if_read_blocked": 1,
