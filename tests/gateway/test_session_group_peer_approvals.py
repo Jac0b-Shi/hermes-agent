@@ -44,6 +44,7 @@ def test_lent_bot_approval_survives_reregistration_and_runs_each_command_once(ga
     config = json.loads((g.target / 'config.yaml').read_text())
     config['platform_toolsets']['api_server'] = ['terminal']
     config['approvals'] = {'mode': 'manual'}
+    config['plugins'] = {'disabled': ['macos-trash-guard']}
     (g.target / 'config.yaml').write_text(json.dumps(config))
     effects = g.target / 'effects'
     g.target_model.command = (
