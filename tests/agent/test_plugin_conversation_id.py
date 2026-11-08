@@ -53,7 +53,7 @@ def probe(tmp_path, monkeypatch):
     manager = plugins.PluginManager()
     monkeypatch.setattr(plugins, "get_plugin_manager", lambda: manager)
     manager.discover_and_load()
-    yield manager._hooks["pre_tool_call"][0].__globals__["events"]
+    yield manager._plugins["conv_probe"].module.events
     registry.deregister("conv_probe")
 
 
